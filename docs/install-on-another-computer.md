@@ -35,23 +35,25 @@ curl --disable -fsS --max-time 15 --noproxy '' --proxy http://127.0.0.1:7890 --o
 
 先核对住宅出口与预期一致，并确认普通代理返回 `200`。只用本机守卫时，在 CCEN 里点“启动守卫”，看到“核验通过”后即可按 [AdsPower 接入说明](adspower.md) 将浏览器代理设为 `127.0.0.1:17899`。
 
-## 3. 让新 Mac 连接已有服务器
+## 3. 让新 Mac 连接目标 SSH 账户
+
+新电脑可以使用另一套 SSH 账户。先从新电脑登录新的平台入口，核实实际 Linux 用户和家目录。平台登录名变化时，实际 Linux 用户有可能仍相同。如果实际用户或家目录不同，请将新机作为独立部署，使用新账户自己的目录、公钥授权、项目以及远端 Codex 登录配置。
 
 1. 准备平台给的网关地址、端口和登录用户名。用平台登录验证 Linux **实际用户名**、家目录的真实路径，以及 Python 3、curl、`codex` 和 `claude` 是否可用。`gateway.user` 是平台登录用的名字，`inner_user` 是进入 Linux 后的账号。可以在服务器上用 `id -un`、`realpath "$HOME"` 和 `command -v python3 curl codex claude` 查看这些值。
 2. 新 Mac 使用自己的 SSH 密钥。可让 Codex 创建该用途的 Ed25519 密钥，再通过已授权的服务端入口把新机的 `.pub` 公钥追加到实际 Linux 用户的 `~/.ssh/authorized_keys`，保留原有公钥。私钥保留在新 Mac。
-3. 参照 [SSH 节点配置示例](../macos/manager/ccen-target.example.json)，在新 Mac 创建 `~/.ssh/ccen-target.json`。`gateway` 填平台信息，`identity` 填新 Mac 的私钥**文件路径**，`inner_user` 和 `shared_home` 填第一步核实的值。此版本的图形连接从这个文件读取远端目标，`deployment.json` 中的 `remote_enabled` 可以保留示例值 `false`。
-4. 保留新机原有的 `~/.ssh/config`，在首个 `Host` 或 `Match` 块前加入 `Include ~/.ssh/ccen.conf`。连接后 CCEN 会生成该文件。若两台 Mac 都连向同一 Linux 节点，请先在旧 Mac 的 CCEN 里点“断开连接”，让新机接管远端 `17899` 和 `7897` 两个监听端口。
+3. 参照 [SSH 节点配置示例](../macos/manager/ccen-target.example.json)，在新 Mac 创建 `~/.ssh/ccen-target.json`。`gateway` 填新账户的平台信息，`identity` 填新 Mac 的私钥**文件路径**，`inner_user` 和 `shared_home` 填第一步核实的值。若新机的 CCEN 已配置另一个 Linux 用户，先退出应用并备份原配置，再更新这些字段并重新打开。界面的“更换节点”适用于同一个实际 Linux 用户和家目录下的节点切换。`deployment.json` 中的 `remote_enabled` 可以保留示例值 `false`。
+4. 保留新机原有的 `~/.ssh/config`，在首个 `Host` 或 `Match` 块前加入 `Include ~/.ssh/ccen.conf`。连接后 CCEN 会生成该文件。若两个连接在同一个 Linux 网络环境中争用 `17899` 或 `7897`，在确认旧连接没有任务依赖后，从旧 Mac 的 CCEN 断开它，再连接新机。
 5. 重新打开新 Mac 上的 CCEN，点“连接服务器”。核对首次显示的网关主机指纹，在原生窗口中用 **⌘V** 粘贴平台当次密码。看到“已连接”和“链路核验通过”后，再打开 Codex 或 Claude Code。需要自启时，在 CCEN 打开“登录 macOS 后启动”。
 
 服务器需要允许 SSH 端口转发，且网关可访问目标 Linux 环境的 `127.0.0.1:22`。CCEN 读取目标的 ED25519 主机公钥，并使用新 Mac 的密钥登录实际 Linux 用户。第一次连接也会检查远端 PATH 上同时有 `codex` 和 `claude`。已有共享家目录的部署通常可沿用原来的工具和配置。
 
-全新服务器需要先按官方说明安装两个 CLI。让远端 Codex 的启动环境使用普通代理 `http://127.0.0.1:7897`，在远端 `~/.claude/settings.json` 的 `env` 里为 Claude Code 设置 `HTTP_PROXY` 和 `HTTPS_PROXY` 为 `http://127.0.0.1:17899`。合并已有设置，并核对实际启动的进程采用了这些端口。 [OpenAI 远端设置](https://learn.chatgpt.com/docs/remote-connections#connect-to-an-ssh-host) · [Claude Code 安装](https://code.claude.com/docs/en/quickstart) · [Claude Code SSH 代理设置](https://code.claude.com/docs/en/desktop#set-a-proxy-or-a-ca-certificate-for-ssh-sessions)
+对于全新服务器或新 Linux 用户，先用该账户检查两个 CLI。缺少哪个就按官方说明安装哪个，确保新账户能在其登录 shell 中调用。让远端 Codex 的启动环境使用普通代理 `http://127.0.0.1:7897`，在该用户的远端 `~/.claude/settings.json` 的 `env` 里为 Claude Code 设置 `HTTP_PROXY` 和 `HTTPS_PROXY` 为 `http://127.0.0.1:17899`。合并已有设置，并核对实际启动的进程采用了这些端口。 [OpenAI 远端设置](https://learn.chatgpt.com/docs/remote-connections#connect-to-an-ssh-host) · [Claude Code 安装](https://code.claude.com/docs/en/quickstart) · [Claude Code SSH 代理设置](https://code.claude.com/docs/en/desktop#set-a-proxy-or-a-ca-certificate-for-ssh-sessions)
 
 ## 4. 验收桌面项目和账号
 
 1. 在新 Mac 的 Codex 中进入 **设置 → 连接**，启用 `ccen`，再从该远端主机选择一个真实项目目录。发一条只读取当前主机名和工作目录的请求。看到 Linux 主机的结果，才表示项目确实在服务器上执行。 [OpenAI 远端连接说明](https://learn.chatgpt.com/docs/remote-connections#connect-to-an-ssh-host)
 2. 使用 Claude Code 时，在 CCEN 点击“打开 Claude Code”，在 Claude 桌面应用的 **Code** 页面选取 SSH 环境 `ccen`，打开远端目录并做同样的只读验证。 [Claude Code 桌面 SSH 说明](https://code.claude.com/docs/en/desktop#ssh-sessions)
-3. 如果用同一个 Linux 用户和共享家目录，有效的远端 Codex 登录通常可复用。如果第一次真实请求报 `401`，让 Codex 检查远端实际 `CODEX_HOME` 和登录状态。需要重新授权时，使用者在浏览器授权。授权成功后仍报 `401`，先确认现有任务状态，再重连远端 Codex 服务使它读到新登录。 [OpenAI 远端登录说明](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
+3. 检查目标 Linux 用户的远端 Codex 登录状态。新账户可以使用你已有的 ChatGPT 账号授权，登录状态保存在该 Linux 用户自己的 Codex 配置中。若该用户已有有效授权，可直接验收。若未登录、授权过期，或请求报 `401`，让 Codex 检查远端实际 `CODEX_HOME`，必要时由使用者在浏览器授权。授权成功后仍报 `401`，先确认现有任务状态，再重连远端 Codex 服务使它读到新登录。 [OpenAI 远端登录说明](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
 
 | 症状 | 首先检查 |
 | --- | --- |
@@ -63,4 +65,4 @@ curl --disable -fsS --max-time 15 --noproxy '' --proxy http://127.0.0.1:7890 --o
 
 ## 复制给新机的 Codex
 
-> 我在这台电脑上安装 CCEN，并连接我已有的 Linux 服务器。请使用本机运行环境，从 https://github.com/ICtutu-JING/ccen 下载匹配架构的 Release，按仓库里的 `docs/install-on-another-computer.md` 帮我安装并验证。先检查操作系统、CPU、代理端口、已有 SSH 配置和已安装的软件，再补齐缺少的设置。需要实际网关、Linux 用户、共享家目录或固定出口信息时告诉我缺什么。SSH 密码由我在 CCEN 窗口粘贴，账号授权由我在浏览器完成。请帮我确认 CCEN 的出口检查、Codex 的 `ccen` 连接和远端项目的一次只读请求；告诉我哪些步骤已完成、哪些还需要我点击。
+> 请在这台电脑上安装 CCEN。我要使用另一套 SSH 账户。请使用本机运行环境，从 https://github.com/ICtutu-JING/ccen 下载匹配架构的 Release，按仓库里的 `docs/install-on-another-computer.md` 操作。用我提供的新 SSH 入口核对实际 Linux 用户和家目录，为新电脑配置公钥授权，检查新账户能否运行 Codex 和 Claude Code，需要时再安装缺少的工具和配置远端账号。SSH 密码由我在 CCEN 窗口粘贴，账号授权由我在浏览器完成。最后确认代理出口、`ccen` 连接和一次只读的远端项目请求。
