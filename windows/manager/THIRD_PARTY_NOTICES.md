@@ -10,6 +10,7 @@ This application uses the following third-party projects. Their licenses remain 
 | pystray | LGPL-3.0 | https://github.com/moses-palmer/pystray |
 | Pillow | HPND | https://python-pillow.org/ |
 | pythonnet | MIT | https://github.com/pythonnet/pythonnet |
+| pywinpty | MIT | https://github.com/andfoy/pywinpty |
 | https-proxy-agent and agent-base | MIT | https://github.com/TooTallNate/proxy-agents |
 | debug | MIT | https://github.com/debug-js/debug |
 | ms | MIT | https://github.com/vercel/ms |

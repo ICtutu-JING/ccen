@@ -17,6 +17,7 @@ from pathlib import Path
 from codex_proxy import CodexProxy
 from processes import AttachedProcess
 from deployment import ROOT, DEPLOYMENT_FILE, HOST, EXPECTED_IP, EXPECTED_COUNTRY, EXPECTED_COLO, REMOTE_PATH
+from gateway import ALIAS, Gateway
 
 FORWARD = '127.0.0.1:7899:127.0.0.1:7899'
 HIDDEN = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -116,7 +117,7 @@ def interpret_remote(payload):
 
 
 class Manager:
-    def __init__(self, data=DATA):
+    def __init__(self, prompt, data=DATA):
         self.data = Path(data)
         self.data.mkdir(parents=True, exist_ok=True)
         self.guard_dir = self.data / 'guard'
@@ -146,6 +147,7 @@ class Manager:
         self.files = []
         self.thread = None
         self.codex = CodexProxy(SSH, HOST, self.launch, self.log)
+        self.gateway = Gateway(SSH, prompt, run)
         self.log('应用已就绪。关闭窗口后继续在托盘运行。')
 
     def log(self, message):
@@ -169,6 +171,8 @@ class Manager:
         for key, owner, attribute in [('guard', self, 'guard_process'),
                                        (7899, self, 'tunnel_process'),
                                        (7897, self.codex, 'process')]:
+            if self.gateway.config and key != 'guard':
+                continue
             if len(existing[key]) > 1:
                 raise RuntimeError(f'{key} 存在多个管理进程，请先处理重复实例')
             if existing[key]:
@@ -207,11 +211,17 @@ class Manager:
     def snapshot(self):
         with self.lock:
             owned = self.tunnel_process is not None and self.tunnel_process.poll() is None
+            server = self.gateway.snapshot()
+            codex = self.codex.snapshot()
+            if server['configured']:
+                owned = server['connected']
+                codex.update(owned=owned, reconnects=self.gateway.connections)
             return dict(settings=dict(self.settings), local_ok=self.local_ok, guard=self.guard_status(),
                         remote=dict(self.remote), tunnel=dict(owned=owned, external=len(self.external_pids),
-                        reconnects=self.reconnect_count, error=self.tunnel_error,
+                        reconnects=self.gateway.connections if server['configured'] else self.reconnect_count,
+                        error=self.tunnel_error,
                         next_retry=max(0, int(self.tunnel_next_try - time.monotonic()))),
-                        codex=self.codex.snapshot(), events=list(self.events), checked_at=time.strftime('%H:%M:%S'),
+                        codex=codex, server=server, events=list(self.events), checked_at=time.strftime('%H:%M:%S'),
                         expected_ip=EXPECTED_IP, expected_country=EXPECTED_COUNTRY, expected_colo=EXPECTED_COLO, host=HOST, data_path=str(self.data))
 
     def _ensure_guard(self):
@@ -237,6 +247,8 @@ class Manager:
         self.log('浏览器守卫已启动，正在核验固定住宅出口。')
 
     def _probe_remote(self):
+        if self.gateway.config:
+            return self.gateway.probe((EXPECTED_IP, EXPECTED_COUNTRY, EXPECTED_COLO))
         orphan_ports = []
         if self.settings['ssh_reconnect'] and not self.external_pids:
             orphan_ports.append(7899)
@@ -298,35 +310,36 @@ class Manager:
     def monitor(self):
         while not self.closed.is_set():
             try:
-                self.local_ok = local_proxy_available()
-                if time.monotonic() - self.last_remote_check >= 30:
-                    try:
-                        existing = managed_processes()
-                        self.external_pids = existing[7899]
-                        self.codex.external_pids = existing[7897]
-                        remote = self._probe_remote()
-                    except (subprocess.TimeoutExpired, OSError, ValueError, RuntimeError) as error:
-                        remote = dict(reachable=False, verified=False, ports=[],
-                                      reason='检查超时' if isinstance(error, subprocess.TimeoutExpired) else str(error))
-                    with self.lock:
-                        before = (self.remote.get('reachable'), self.remote.get('verified'), self.remote.get('reason'))
-                        self.remote = remote
-                    after = (remote.get('reachable'), remote.get('verified'), remote.get('reason'))
-                    if before != after:
-                        self.log('远端：' + ('住宅链及远端守卫核验通过' if remote.get('verified') else remote.get('reason', '等待核验')))
-                    if remote.get('verified'):
-                        self.failures = 0
-                        self.tunnel_error = ''
-                    self.codex.update_remote(remote)
-                    self.last_remote_check = time.monotonic()
                 with self.actions:
                     if self.closed.is_set():
                         break
+                    self.local_ok = local_proxy_available()
+                    if time.monotonic() - self.last_remote_check >= 30:
+                        try:
+                            if not self.gateway.config:
+                                existing = managed_processes()
+                                self.external_pids = existing[7899]
+                                self.codex.external_pids = existing[7897]
+                            remote = self._probe_remote()
+                        except (subprocess.TimeoutExpired, OSError, ValueError, RuntimeError) as error:
+                            remote = dict(reachable=False, verified=False, ports=[],
+                                          reason='检查超时' if isinstance(error, subprocess.TimeoutExpired) else str(error))
+                        with self.lock:
+                            before = (self.remote.get('reachable'), self.remote.get('verified'), self.remote.get('reason'))
+                            self.remote = remote
+                        after = (remote.get('reachable'), remote.get('verified'), remote.get('reason'))
+                        if before != after:
+                            self.log('远端：' + remote.get('reason', '等待核验'))
+                        if remote.get('verified'):
+                            self.failures = 0
+                            self.tunnel_error = ''
+                        self.codex.update_remote(remote)
+                        self.last_remote_check = time.monotonic()
                     if self.settings['guard_enabled']:
                         self._ensure_guard()
-                    if self.settings['ssh_reconnect']:
+                    if self.settings['ssh_reconnect'] and not self.gateway.config:
                         self._ensure_tunnel()
-                    self.codex.ensure(self.settings['codex_reconnect'], self.remote)
+                    self.codex.ensure(self.settings['codex_reconnect'] and not self.gateway.config, self.remote)
             except Exception as error:
                 self.log('管理操作失败：' + str(error))
             self.wake.wait(3)
@@ -367,6 +380,48 @@ class Manager:
         self.wake.set()
         return {'ok': True}
 
+    def connect_server(self, host=None, user=None, port=None, account=None):
+        with self.actions:
+            if host is None and self.gateway.connected:
+                return self.check_now()
+
+            def prepare():
+                for owner, attribute in ((self, 'tunnel_process'), (self.codex, 'process')):
+                    process = getattr(owner, attribute)
+                    if process is not None:
+                        self._stop_owned(process)
+                        setattr(owner, attribute, None)
+                self.external_pids = []
+                self.codex.external_pids = []
+                self.tunnel_error = ''
+                self.codex.error = ''
+                self.settings['guard_enabled'] = True
+                self.save()
+                self._ensure_guard()
+                self.remote = dict(reachable=False, verified=False, reason='正在连接服务器', ports=[])
+                self.codex.update_remote(self.remote)
+
+            try:
+                self.gateway.connect(prepare, host, user, port, account)
+                if self.gateway.connected:
+                    self.log(self.gateway.message)
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+                self.gateway.message = str(error)
+                self.log('服务器连接失败：' + str(error))
+                return {'ok': False, 'error': str(error)}
+            finally:
+                self.check_now()
+        return {'ok': True}
+
+    def disconnect_server(self):
+        with self.actions:
+            self.gateway.close()
+            self.gateway.message = '已断开服务器连接。'
+            self.remote = dict(reachable=False, verified=False, reason=self.gateway.message, ports=[])
+            self.codex.update_remote(self.remote)
+        self.check_now()
+        return {'ok': True}
+
     def set_codex_reconnect(self, enabled):
         with self.actions:
             self.settings['codex_reconnect'] = bool(enabled)
@@ -379,6 +434,8 @@ class Manager:
         return {'ok': True}
 
     def restart_owned_tunnel(self):
+        if self.gateway.config:
+            return {'ok': False, 'error': '请用“更换节点”重新登录服务器。'}
         with self.actions:
             if self.tunnel_process is None or self.tunnel_process.poll() is not None:
                 return {'ok': False, 'error': '当前隧道由其他程序维持。启用自动恢复后，应用会在它退出时接续。'}
@@ -410,7 +467,13 @@ class Manager:
         return {'ok': True}
 
     def open_vscode(self):
-        os.startfile(f'vscode://vscode-remote/ssh-remote+{HOST}{REMOTE_PATH}')
+        from urllib.parse import quote
+        if self.gateway.config:
+            if not self.gateway.connected:
+                return {'ok': False, 'error': '请先连接服务器。'}
+            os.startfile(f'vscode://vscode-remote/ssh-remote+{ALIAS}{quote(self.gateway.config["shared_home"])}')
+        else:
+            os.startfile(f'vscode://vscode-remote/ssh-remote+{HOST}{REMOTE_PATH}')
         return {'ok': True}
 
     def open_logs(self):
@@ -427,6 +490,7 @@ class Manager:
         self.closed.set()
         self.wake.set()
         with self.actions:
+            self.gateway.close()
             for process in (self.guard_process, self.tunnel_process, self.codex.process):
                 if process is not None:
                     self._stop_owned(process)

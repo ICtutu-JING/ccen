@@ -5,8 +5,53 @@ const reasonText = {verified:'出口核验通过。已有连接每 10 秒复核�
 function text(id, value){ $(id).textContent = value; }
 function badge(id, label, kind){text(id,label);$(id).className='pill '+kind;}
 function toast(message){text('toast',message);$('toast').classList.add('visible');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('toast').classList.remove('visible'),6500);}
-async function action(name,...args){if(busy)return;busy=true;document.querySelectorAll('button').forEach(x=>x.disabled=true);try{const r=await window.pywebview.api[name](...args);if(r&&!r.ok)toast(r.error);else if(name==='check_now')toast('正在检查实际连接，结果会自动更新。');await refresh();}catch(e){toast(String(e));}finally{busy=false;document.querySelectorAll('button').forEach(x=>x.disabled=false);}}
+async function action(name,...args){
+ if(busy)return;
+ busy=true;
+ document.querySelectorAll('button').forEach(button=>button.disabled=true);
+ try{
+  const result=await window.pywebview.api[name](...args);
+  if(result&&!result.ok)toast(result.error);
+  else if(name==='check_now')toast('正在检查实际连接，结果会自动更新。');
+ }catch(error){toast(String(error));}
+ finally{
+  busy=false;
+  document.querySelectorAll('button').forEach(button=>button.disabled=false);
+  await refresh();
+ }
+}
+function renderServer(server){
+ const {configured,connected,gateway,node,phase,message}=server;
+ text('server-address',configured?gateway.host+':'+gateway.port:'尚未添加');
+ text('server-detail',configured?[gateway.user,node].filter(Boolean).join(' · '):'');
+ const pending=phase==='password'?'等待密码':phase==='connecting'?'正在连接':'';
+ badge('server-badge',pending||(connected?'已连接':'未连接'),connected&&!pending?'good':'neutral');
+ text('server-message',pending==='等待密码'?'请在系统窗口输入当次密码。':pending||message||
+      (configured?'点击“连接服务器”恢复连接。':'添加平台 SSH 入口后，用系统密码窗口连接。'));
+ text('connect-server',connected?'检查连接':configured?'连接服务器':'添加服务器');
+ text('change-server',node?'更换节点':'编辑服务器');
+ $('connect-server').disabled=busy;
+ $('change-server').hidden=!configured;
+ $('change-server').disabled=busy;
+ $('disconnect-server').disabled=busy||!connected;
+}
+function showServerDialog(){
+ const server=state.server;
+ const {host='',user='',port=22}=server.gateway;
+ const {inner_user,shared_home,identity}=server.account;
+ text('server-dialog-title',server.node?'更换节点':server.configured?'编辑服务器':'添加服务器');
+ text('save-server',server.node?'连接新节点':'保存并连接');
+ $('server-account').hidden=Boolean(server.node);
+ $('server-switch-note').hidden=!server.node;
+ $('server-form-error').hidden=true;
+ for(const [id,value] of Object.entries({
+  'server-host':host,'server-user':user,'server-port':port,
+  'server-inner-user':inner_user,'server-home':shared_home,'server-key':identity,
+ }))$(id).value=value;
+ $('server-dialog').showModal();
+}
 function render(s){state=s;text('expected-ip',s.expected_ip);text('expected-region',s.expected_country+' / '+s.expected_colo);const g=s.guard,r=s.remote,t=s.tunnel,c=s.codex;
+ renderServer(s.server);
  badge('codex-badge',c.remote.verified?'代理可用':c.owned?'等待上游':'等待连接',c.remote.verified?'good':'warn');
  text('codex-health',c.remote.verified?'已连通 ChatGPT':'等待连接');
  $('codex-count').replaceChildren(document.createTextNode(String(c.reconnects)+' '),Object.assign(document.createElement('small'),{textContent:'次'}));
@@ -28,10 +73,44 @@ function render(s){state=s;text('expected-ip',s.expected_ip);text('expected-regi
  $('startup').checked=s.settings.startup;text('updated',s.checked_at);
  if(s.events.length)text('latest-event',s.events[0].message);
  $('event-list').replaceChildren(...s.events.map(e=>{const row=document.createElement('div');row.className='event';const stamp=document.createElement('time'),msg=document.createElement('p');stamp.textContent=e.time;msg.textContent=e.message;row.append(stamp,msg);return row;}));
- $('restart-owned').disabled=!t.owned;
+ $('restart-owned').disabled=busy||s.server.configured||!t.owned;
+ $('ssh-toggle').hidden=s.server.configured;
+ $('codex-toggle').hidden=s.server.configured;
+ if(s.server.configured){
+  text('ssh-foot',s.server.connected?'由“我的服务器”保持连接':'请在“我的服务器”连接');
+  text('codex-foot',s.server.connected?'由“我的服务器”保持连接':'请在“我的服务器”连接');
+ }
 }
 async function refresh(){if(!window.pywebview?.api)return;try{render(await window.pywebview.api.snapshot());}catch(e){toast('状态读取失败：'+e);}}
 document.querySelectorAll('.nav').forEach(button=>button.onclick=()=>{document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('active',x===button));document.querySelectorAll('.page').forEach(x=>x.classList.toggle('hidden',x.id!==button.dataset.page));text('page-title',button.dataset.page==='overview'?'连接总览':'运行记录');});
+$('connect-server').onclick=()=>{
+ if(!state)return;
+ if(state.server.configured)action('connect_server');
+ else showServerDialog();
+};
+$('change-server').onclick=showServerDialog;
+$('close-server').onclick=()=>$('server-dialog').close();
+$('save-server').onclick=()=>{
+ const [host,user,port]=['server-host','server-user','server-port'].map(id=>$(id).value.trim());
+ const account=state.server.node?null:{
+  inner_user:$('server-inner-user').value.trim(),
+  shared_home:$('server-home').value.trim(),
+  identity:$('server-key').value.trim()
+ };
+ if(!host||!user||!port||(account&&Object.values(account).some(value=>!value))){
+  text('server-form-error','请填写全部服务器字段。');
+  $('server-form-error').hidden=false;
+  return;
+ }
+ $('server-dialog').close();
+ action('connect_server',host,user,port,account);
+};
+$('disconnect-server').onclick=()=>$('disconnect-dialog').showModal();
+$('cancel-disconnect').onclick=()=>$('disconnect-dialog').close();
+$('confirm-disconnect').onclick=()=>{
+ $('disconnect-dialog').close();
+ action('disconnect_server');
+};
 $('guard-toggle').onclick=()=>state&&action('set_guard',!state.settings.guard_enabled);
 $('ssh-toggle').onclick=()=>state&&action('set_reconnect',!state.settings.ssh_reconnect);
 $('codex-toggle').onclick=()=>state&&action('set_codex_reconnect',!state.settings.codex_reconnect);

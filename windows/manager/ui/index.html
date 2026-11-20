@@ -8,6 +8,13 @@
 <header><div><div class="eyebrow">CLAUDE / CODEX CONNECTION MANAGER</div><h1 id="page-title">连接总览</h1><p>浏览器守卫与远程代理统一托管，关闭窗口后继续在托盘运行。</p></div><button class="secondary" id="refresh">↻ 检查链路</button></header>
 <section id="overview" class="page">
 <div class="exit-banner"><div class="exit-mark">⌾</div><div><span class="caption">唯一允许的 Claude 出口</span><div class="exit-address"><b id="expected-ip">等待配置</b> <span id="expected-region">—</span></div></div><span class="pill dark">出口异常即阻断</span></div>
+<article class="server-bar">
+<div><span class="caption">我的服务器</span><h2 id="server-address">尚未添加</h2><p id="server-detail"></p></div>
+<div class="server-actions"><span id="server-badge" class="pill neutral">未连接</span>
+<button class="primary" id="connect-server">添加服务器</button><button class="secondary" id="change-server" hidden>更换节点</button>
+<button class="text-button" id="disconnect-server" disabled>断开连接</button></div>
+<p id="server-message" class="server-message">添加平台 SSH 入口后，使用系统密码窗口连接。</p>
+</article>
 <div class="connection-grid">
 <article class="card"><div class="card-top"><div class="card-icon">◇</div><span id="guard-badge" class="pill neutral">尚未启动</span></div><div class="overline">ADSPOWER / 浏览器</div><h2>住宅出口守卫</h2><p class="card-sub">只有出口核验通过，才允许浏览器联网。</p>
 <div class="flow"><span>浏览器</span><i>→</i><b>本地守卫</b><i>→</i><span>固定住宅</span></div>
@@ -34,5 +41,23 @@
 </section>
 <section id="activity" class="page hidden"><article class="card activity-card"><div class="activity-head"><div><h2>运行记录</h2><p class="card-sub">连接变化与恢复结果，不记录账号密码和聊天内容。</p></div><button class="secondary" id="open-logs">打开日志目录</button></div><div id="event-list"></div></article><button class="secondary" id="restart-owned">重新建立本应用托管的隧道</button><p class="muted">已有 VS Code 会话与其他程序的隧道由原程序维持。暂停自动恢复不会断开当前连接。</p></section>
 </main>
+<dialog id="server-dialog">
+<div class="dialog-head"><h2 id="server-dialog-title">添加服务器</h2><button id="close-server" class="icon-button" aria-label="取消">×</button></div>
+<label class="field-label">服务器地址<input id="server-host" autocomplete="off" placeholder="例如 192.0.2.10"></label>
+<label class="field-label">平台登录用户名<input id="server-user" autocomplete="off"></label>
+<label class="field-label">SSH 端口<input id="server-port" type="number" min="1" max="65535" value="22"></label>
+<div id="server-account">
+<p class="note">首次添加时请核实实际 Linux 账户和家目录，并在该账户授权这台电脑的 SSH 公钥。</p>
+<label class="field-label">实际 Linux 用户<input id="server-inner-user" autocomplete="off"></label>
+<label class="field-label">远端家目录<input id="server-home" autocomplete="off" placeholder="例如 /home/your-user"></label>
+<label class="field-label">本机 SSH 私钥路径<input id="server-key" autocomplete="off" placeholder="例如 ~/.ssh/id_ed25519_ccen"></label>
+</div>
+<p id="server-switch-note" class="note" hidden>更换节点会断开当前 CCEN 通道。请先结束依赖旧连接的任务。</p>
+<p id="server-form-error" class="bad" role="alert" hidden></p>
+<button class="primary wide" id="save-server">保存并连接</button>
+</dialog>
+<dialog id="disconnect-dialog"><div class="dialog-head"><h2>断开服务器？</h2></div>
+<p>Codex 和 Claude Code 的远端连接会中断，本机浏览器守卫继续运行。</p>
+<div class="card-actions"><button class="secondary" id="cancel-disconnect">取消</button><button class="primary" id="confirm-disconnect">断开连接</button></div></dialog>
 <dialog id="guide"><div class="dialog-head"><h2>把 Claude 环境接入守卫</h2><button id="close-guide" class="icon-button">×</button></div><p>在 AdsPower 中编辑用于 Claude 的浏览器环境，将代理设为：</p><div class="proxy-details"><div><span>代理类型</span><b>HTTP</b></div><div><span>代理主机</span><b>127.0.0.1</b></div><div><span>代理端口</span><b>17899</b></div><div><span>账号 / 密码</span><b>留空</b></div></div><p>保存后重新打开该环境。该环境的网页流量将经过固定住宅出口。已有标签页需要重新连接后才受守卫保护。</p><p class="note">请关闭该环境的 WebRTC 与 QUIC。守卫仅管理经过它的 TCP 流量；停止守卫后，该环境应无法联网。</p><button class="primary wide" id="copy-proxy">复制代理地址</button></dialog>
 <div id="toast" role="status"></div><script>// APP_SCRIPT</script></body></html>

@@ -17,7 +17,7 @@ try {
         --name ClaudeConnectionManager --icon resources\app.ico `
         --add-data 'ui;ui' --add-data 'resources\guard.cjs;resources' `
         --add-data 'resources\node_modules;resources\node_modules' `
-        --add-binary "$Node;runtime" --collect-all webview `
+        --add-binary "$Node;runtime" --collect-all webview --collect-all winpty `
         --copy-metadata pystray --copy-metadata pywebview --copy-metadata Pillow `
         --distpath dist --workpath build app.pyw
     if ($LASTEXITCODE -ne 0) { throw 'Windows 应用构建失败' }

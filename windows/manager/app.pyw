@@ -4,6 +4,8 @@ import ctypes
 import sys
 import threading
 from pathlib import Path
+import tkinter as tk
+from tkinter import messagebox, simpledialog
 
 import pystray
 import webview
@@ -36,9 +38,25 @@ def icon_image():
     return im
 
 
+def server_prompt(message, password=False):
+    parent = tk.Tk()
+    parent.withdraw()
+    parent.attributes('-topmost', True)
+    try:
+        if password:
+            return simpledialog.askstring(
+                'CCEN · 连接服务器',
+                message + '\n请用 Ctrl+V 粘贴当次 SSH 密码。密码不会保存。',
+                show='*', parent=parent,
+            )
+        return messagebox.askyesno('CCEN · 核对网关主机指纹', message, parent=parent)
+    finally:
+        parent.destroy()
+
+
 class App:
     def __init__(self):
-        self.manager = Manager()
+        self.manager = Manager(server_prompt)
         self.exiting = False
         self.tray = None
         html = (ROOT / 'ui/index.html').read_text(encoding='utf-8')
@@ -48,6 +66,7 @@ class App:
                     min_size=(960, 720), background_color='#f4f6f3', hidden='--tray' in sys.argv)
         self.window.expose(self.manager.snapshot, self.manager.set_guard, self.manager.set_reconnect,
                            self.manager.set_codex_reconnect,
+                           self.manager.connect_server, self.manager.disconnect_server,
                            self.manager.check_now, self.manager.restart_owned_tunnel,
                            self.manager.set_startup, self.manager.open_vscode, self.manager.open_logs)
         self.window.events.closing += self.on_close

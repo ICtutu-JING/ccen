@@ -6,7 +6,7 @@
 | --- | --- |
 | Apple Silicon Mac，macOS 13.5 或以上 | [下载 macOS ZIP](https://github.com/ICtutu-JING/ccen/releases/tag/macos-2026.11.20)，按下文操作。ZIP 内包含 Python 和 Node 运行时。 |
 | Intel Mac | 当前 Release 提供 Apple Silicon ZIP。Intel 机器需按 [macOS 构建说明](../macos/manager/README.md#构建) 使用同架构的依赖自行构建和验收。 |
-| Windows x64 | 按 [Windows 安装教程](windows.md) 下载、解压并配置。该版本使用已有 SSH 别名和 Linux gate。 |
+| Windows x64 | 按 [Windows 安装教程](windows.md) 下载、解压并配置。新版可在「我的服务器」添加、连接和更换节点。图形登录用 Ctrl+V 粘贴密码。 |
 | Linux | 按 [Linux 部署教程](linux.md) 配置命令行、固定出口 gate 和 wrapper。 |
 
 ## 1. 下载并启动 Mac 应用

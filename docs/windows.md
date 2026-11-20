@@ -4,11 +4,12 @@
 
 ## 下载和运行
 
-1. 下载 [v2026.10.30 便携版](https://github.com/ICtutu-JING/ccen/releases/tag/v2026.10.30)，解压整个目录。
-2. 按 [软件说明](../windows/manager/README.md) 编辑 EXE 同目录的 deployment.json，填写自己的 SSH 别名、固定出口 IP、国家、Claude 节点和远端工作目录。
-3. 确认 Windows OpenSSH、WebView2 Runtime、本机住宅代理 7899 和普通代理 7897 可用，SSH 别名支持现有密钥免交互连接。
-4. 部署并核验 [Linux gate](linux.md)，其预期出口与 Windows 配置一致。
-5. 运行 ClaudeConnectionManager.exe，分别启用需要的守卫和自动恢复；浏览器按 [AdsPower](adspower.md) 设置。
+1. 下载 [Windows x64 便携版](https://github.com/ICtutu-JING/ccen/releases/tag/windows-2026.11.20)，完整解压后运行 `ClaudeConnectionManager.exe`。需要 Windows 10（1809 或更高）/11、OpenSSH Client 和 WebView2 Runtime。
+2. 让 Windows 上的 HTTP 住宅代理监听 `127.0.0.1:7899`，普通代理监听 `127.0.0.1:7897`。在 EXE 同目录的 `deployment.json` 填入实际固定出口 IP、国家和 Claude 节点，保存后重开应用。
+3. 在新电脑生成或准备 SSH 密钥，通过平台入口核实实际 Linux 用户和家目录，并把新机公钥授权给该账户。目标还要允许 SSH 转发、运行内部 SSH 端口 22，并在其登录环境中提供 `python3`、`curl`、`codex` 和 `claude`。
+4. 点 **我的服务器 → 添加服务器**，填写平台地址、用户名、端口，以及实际 Linux 用户、家目录和本机私钥文件路径。点“保存并连接”，在 Windows 密码窗口按 **Ctrl+V** 粘贴当次平台密码。首次提示主机身份时核对指纹。
+5. 成功后应用生成 `ccen` SSH 入口。从 Codex 的连接设置启用 `ccen`，或在 Claude Code 的 SSH 环境选它，再选远端项目。用一次只读请求验证应用确实在远端执行。
+6. 同一 Linux 用户和家目录内换节点时点“更换节点”。输入新的平台端点和密码，应用会重新登录，即使平台地址和用户名与上次相同。
 
 发布包中的 IP 是文档示例，不能作为实际住宅代理使用。包内没有代理认证、SSH 私钥、模型登录或浏览器 profile。
 
@@ -17,12 +18,13 @@
 | 组件 | 路径 |
 | --- | --- |
 | 浏览器 | AdsPower HTTP 17899 → 本机守卫 → Windows 住宅 7899 |
-| Claude | Linux gate 17898 → Linux 住宅 7899 → SSH → Windows 住宅 7899 |
+| Claude Code 图形 SSH 会话 | 远端 17899 → SSH → Windows 17899 守卫 → 固定住宅 7899 |
+| Linux gate 部署 | Linux gate 17898 → Linux 住宅 7899 → SSH → Windows 住宅 7899 |
 | Codex | Linux 普通代理 7897 → SSH → Windows 普通代理 7897 |
 
-17898 不做 SSH 转发。软件读取已有 SSH 别名，不写入代理密码，不修改 Clash 配置。Mihomo 的进程、域名和 DNS 规则仍按 [代理与 SSH](proxy-and-ssh.md) 配置。
+图形连接在远端应用的 Claude 启动环境中使用 `http://127.0.0.1:17899`，Codex 使用 `http://127.0.0.1:7897`。配置已有的 Linux gate 时使用 `7899`，端口 `17898` 留在 Linux 上。已有的手动 SSH 别名部署仍可按 [原有配置方式](../windows/manager/README.md) 使用。Mihomo 的进程、域名和 DNS 规则仍按 [代理与 SSH](proxy-and-ssh.md) 配置。
 
-浏览器守卫只管理接入它的 TCP 连接，WebRTC、UDP、DNS 与其他程序分别配置和验收。Codex 卡片通过 ChatGPT HEAD 请求检查网络，不发送模型消息。
+浏览器守卫只管理接入它的 TCP 连接，WebRTC、UDP、DNS 与其他程序分别配置和验收。图形连接模式会检查 OpenAI 授权服务能否访问。登录仍由目标 Linux 用户完成，首次使用项目时应发送只读请求实测。
 
 ## 构建
 
@@ -45,4 +47,4 @@ py -3.10 -m venv .venv
 
 更新时先退出旧版，再启动新目录；不要同时运行维护相同端口的旧计划任务。卸载时先关闭自启，再退出管理器，最后删除解压目录。自己的 SSH 和代理配置仍由各自工具维护。
 
-本次上传未覆盖当前安装目录。验证记录见 [inventory.md](inventory.md)；各设备的浏览器、重启、自启及网络隔离按 [verification.md](verification.md) 验收。
+更新后从“我的服务器”管理图形连接。断线后点击“连接服务器”再输入当次平台密码。验证记录见 [inventory.md](inventory.md)；各设备的浏览器、重启、自启及网络隔离按 [verification.md](verification.md) 验收。

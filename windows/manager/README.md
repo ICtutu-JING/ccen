@@ -4,7 +4,11 @@ Windows 托盘软件，统一维护浏览器固定出口守卫、Linux Claude �
 
 ## 下载和运行
 
-1. 下载 [Windows 便携包](https://github.com/ICtutu-JING/ccen/releases/tag/v2026.10.30)，解压整个目录。
+新机使用平台临时密码时，在应用的「我的服务器」添加服务器，然后在原生窗口用 Ctrl+V 粘贴密码。连接后可在同一账户/家目录内更换节点。完整步骤见 [Windows 安装和换节点指南](../../docs/windows.md)。
+
+以下步骤适用于已经部署 Linux gate、仍要使用自定义 SSH 别名的环境。
+
+1. 下载 [Windows 便携包](https://github.com/ICtutu-JING/ccen/releases/tag/windows-2026.11.20)，解压整个目录。
 2. 编辑 EXE 同目录的 `deployment.json`，填写自己的 SSH 别名、固定出口 IP、国家、Claude 节点和远端工作目录。示例 IP 不能联网使用。
 3. 先配置 Windows 的本机住宅代理 `127.0.0.1:7899`、普通代理 `127.0.0.1:7897`，并部署仓库的 Linux gate。确认 SSH 别名能通过现有密钥免交互连接。
 4. 双击 `ClaudeConnectionManager.exe`，分别启用浏览器守卫、Claude 和 Codex 自动恢复。

@@ -1,0 +1,43 @@
+name: Publish Windows app
+
+on:
+  push:
+    tags: ['windows-*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+      - name: Build and verify the Windows application
+        working-directory: windows/manager
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install -r requirements-build.txt paramiko==4.0.0
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          .venv\Scripts\python.exe verify_gateway_login.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows OpenSSH password flow failed' }
+          ./build.ps1
+          if (-not (Test-Path 'dist/ClaudeConnectionManager/ClaudeConnectionManager.exe')) { throw 'Missing EXE' }
+          Compress-Archive -Path dist/ClaudeConnectionManager -DestinationPath dist/CCEN-Windows-x64.zip
+      - name: Publish the Windows x64 ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create $env:GITHUB_REF_NAME 'windows/manager/dist/CCEN-Windows-x64.zip#Windows x64 ZIP' `
+            --verify-tag --title "CCEN for Windows $($env:GITHUB_REF_NAME -replace '^windows-', '')" --latest=false `
+            --notes '从「我的服务器」添加或更换节点，按 Ctrl+V 粘贴当次 SSH 密码。包内含配置示例，需准备 Windows OpenSSH、WebView2、本机代理和远端账户。'
