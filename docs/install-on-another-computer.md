@@ -4,7 +4,7 @@
 
 | 目标电脑 | 入口 |
 | --- | --- |
-| Apple Silicon Mac，macOS 13.5 或以上 | [下载 macOS ZIP](https://github.com/ICtutu-JING/ccen/releases/tag/macos-2026.11.06.1)，按下文操作。ZIP 内包含 Python 和 Node 运行时。 |
+| Apple Silicon Mac，macOS 13.5 或以上 | [下载 macOS ZIP](https://github.com/ICtutu-JING/ccen/releases/tag/macos-2026.11.20)，按下文操作。ZIP 内包含 Python 和 Node 运行时。 |
 | Intel Mac | 当前 Release 提供 Apple Silicon ZIP。Intel 机器需按 [macOS 构建说明](../macos/manager/README.md#构建) 使用同架构的依赖自行构建和验收。 |
 | Windows x64 | 按 [Windows 安装教程](windows.md) 下载、解压并配置。该版本使用已有 SSH 别名和 Linux gate。 |
 | Linux | 按 [Linux 部署教程](linux.md) 配置命令行、固定出口 gate 和 wrapper。 |
@@ -41,9 +41,9 @@ curl --disable -fsS --max-time 15 --noproxy '' --proxy http://127.0.0.1:7890 --o
 
 1. 准备平台给的网关地址、端口和登录用户名。用平台登录验证 Linux **实际用户名**、家目录的真实路径，以及 Python 3、curl、`codex` 和 `claude` 是否可用。`gateway.user` 是平台登录用的名字，`inner_user` 是进入 Linux 后的账号。可以在服务器上用 `id -un`、`realpath "$HOME"` 和 `command -v python3 curl codex claude` 查看这些值。
 2. 新 Mac 使用自己的 SSH 密钥。可让 Codex 创建该用途的 Ed25519 密钥，再通过已授权的服务端入口把新机的 `.pub` 公钥追加到实际 Linux 用户的 `~/.ssh/authorized_keys`，保留原有公钥。私钥保留在新 Mac。
-3. 参照 [SSH 节点配置示例](../macos/manager/ccen-target.example.json)，在新 Mac 创建 `~/.ssh/ccen-target.json`。`gateway` 填新账户的平台信息，`identity` 填新 Mac 的私钥**文件路径**，`inner_user` 和 `shared_home` 填第一步核实的值。若新机的 CCEN 已配置另一个 Linux 用户，先退出应用并备份原配置，再更新这些字段并重新打开。界面的“更换节点”适用于同一个实际 Linux 用户和家目录下的节点切换。`deployment.json` 中的 `remote_enabled` 可以保留示例值 `false`。
-4. 保留新机原有的 `~/.ssh/config`，在首个 `Host` 或 `Match` 块前加入 `Include ~/.ssh/ccen.conf`。连接后 CCEN 会生成该文件。若两个连接在同一个 Linux 网络环境中争用 `17899` 或 `7897`，在确认旧连接没有任务依赖后，从旧 Mac 的 CCEN 断开它，再连接新机。
-5. 重新打开新 Mac 上的 CCEN，点“连接服务器”。核对首次显示的网关主机指纹，在原生窗口中用 **⌘V** 粘贴平台当次密码。看到“已连接”和“链路核验通过”后，再打开 Codex 或 Claude Code。需要自启时，在 CCEN 打开“登录 macOS 后启动”。
+3. 新机打开 CCEN，在 **我的服务器 → 添加服务器** 填写平台地址、平台登录用户名、端口、实际 Linux 用户、远端家目录和新 Mac 的私钥**文件路径**。这些字段对应 [SSH 节点配置示例](../macos/manager/ccen-target.example.json)。若新机的 CCEN 已经连过另一个实际 Linux 用户，先退出并备份原 `~/.ssh/ccen-target.json`，再更新该文件。已连接过的配置使用“更换节点”时，仍要求实际 Linux 用户和家目录与配置一致。
+4. 点击“保存并连接”，在原生窗口用 **⌘V** 粘贴当次密码，核对首次提示的网关主机指纹。CCEN 会保存 `~/.ssh/ccen-target.json`，并加入管理 `ccen` 别名所需的 SSH Include。如果首次验证失败，可点“编辑服务器”修正账户、目录或密钥。如果两台电脑的连接在同一 Linux 网络环境中争用远端 `17899` 或 `7897`，确认旧连接没有任务依赖后再从旧电脑断开。
+5. 看到“已连接”和“链路核验通过”后，再打开 Codex 或 Claude Code。需要自启时，在 CCEN 打开“登录 macOS 后启动”。
 
 服务器需要允许 SSH 端口转发，且网关可访问目标 Linux 环境的 `127.0.0.1:22`。CCEN 读取目标的 ED25519 主机公钥，并使用新 Mac 的密钥登录实际 Linux 用户。第一次连接也会检查远端 PATH 上同时有 `codex` 和 `claude`。已有共享家目录的部署通常可沿用原来的工具和配置。
 

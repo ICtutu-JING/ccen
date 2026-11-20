@@ -2,7 +2,7 @@
 
 CCEN 包含 macOS 菜单栏连接管理器、Windows 托盘连接管理器，以及 Linux 固定出口 gate 和 Claude 网络 namespace。
 
-- [下载 macOS Apple Silicon 版](https://github.com/ICtutu-JING/ccen/releases/tag/macos-2026.11.06.1) · [源码和配置](macos/manager/README.md)
+- [下载 macOS Apple Silicon 版](https://github.com/ICtutu-JING/ccen/releases/tag/macos-2026.11.20) · [源码和配置](macos/manager/README.md)
 - [下载 Windows x64 便携版](https://github.com/ICtutu-JING/ccen/releases/tag/v2026.10.30) · [源码和配置](windows/manager/README.md)
 
 macOS 版支持在图形界面连接服务器、粘贴当次 SSH 密码并更换节点，Codex 和 Claude Code 共用 `ccen` 入口。配置示例采用本机使用的端口，实际代理出口、服务器和密钥路径由使用者在本机填写。

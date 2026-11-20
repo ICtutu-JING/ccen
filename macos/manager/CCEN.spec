@@ -23,5 +23,5 @@ collection = COLLECT(executable, analysis.binaries, analysis.datas,
 application = BUNDLE(collection, name='ClaudeConnectionManager.app',
     icon=str(root / 'resources/app.icns'), bundle_identifier='com.ccen.connection-manager',
     info_plist={'CFBundleDisplayName': 'Claude / Codex 连接管理器',
-                'CFBundleShortVersionString': '2026.11.06.1',
+                'CFBundleShortVersionString': '2026.11.20',
                 'LSMinimumSystemVersion': '13.5', 'NSHighResolutionCapable': True})

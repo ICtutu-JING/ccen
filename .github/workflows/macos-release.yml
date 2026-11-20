@@ -1,0 +1,39 @@
+name: Publish macOS app
+
+on:
+  push:
+    tags: ['macos-*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+      - name: Build and verify the app
+        working-directory: macos/manager
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-build.txt
+          ./build.sh
+          codesign --verify --deep --strict dist/ClaudeConnectionManager.app
+          version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' dist/ClaudeConnectionManager.app/Contents/Info.plist)
+          test "$GITHUB_REF_NAME" = "macos-$version"
+      - name: Publish the Apple Silicon ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            'macos/manager/dist/CCEN-macOS-arm64.zip#macOS Apple Silicon ZIP' \
+            --verify-tag --title "CCEN for macOS ${GITHUB_REF_NAME#macos-}" --latest \
+            --notes 'Apple Silicon 版。首次安装可在「我的服务器」点击「添加服务器」，录入 SSH 账户后粘贴当次密码连接。安装包使用 ad-hoc 签名，尚未公证。'

@@ -82,7 +82,13 @@ class Manager:
         self.wake.set()
         return dict(ok=True)
 
-    def connect_server(self, host=None, user=None, port=None):
+    def connect_server(self, host=None, user=None, port=None, account=None):
+        if account is not None:
+            try:
+                self.connection.configure(host, user, port, account)
+            except (OSError, RuntimeError, ValueError) as error:
+                return dict(ok=False, error=str(error))
+            host = user = port = None
         result = self.set_guard(True)
         if not result['ok']:
             return result

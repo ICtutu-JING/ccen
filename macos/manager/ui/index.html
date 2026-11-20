@@ -28,7 +28,21 @@
 </section>
 <section id="activity" class="page hidden"><article class="card activity-card"><div class="activity-head"><div><h2>运行记录</h2><p class="card-sub">记录连接状态，不记录密码和聊天内容。</p></div><button class="secondary" id="open-logs">打开日志目录</button></div><div id="event-list"></div></article></section>
 </main>
-<dialog id="server-dialog"><div class="dialog-head"><h2>更换服务器节点</h2><button id="close-server" class="icon-button">×</button></div><p>填写平台新分配的服务器信息。密码在下一步的系统弹窗中输入。</p><label class="field-label">服务器地址<input id="server-host" type="text" autocomplete="off" placeholder="例如 192.0.2.10"></label><label class="field-label">登录用户名<input id="server-user" type="text" autocomplete="off" placeholder="平台提供的用户名"></label><label class="field-label">SSH 端口<input id="server-port" type="number" min="1" max="65535" value="22"></label><p class="note">更换后会断开当前 CCEN 通道。先结束依赖旧连接的工作，再点击连接新节点。</p><button class="primary wide" id="save-server">连接新节点</button></dialog>
+<dialog id="server-dialog">
+<div class="dialog-head"><h2 id="server-dialog-title">添加服务器</h2><button id="close-server" class="icon-button">×</button></div>
+<p>填写平台提供的 SSH 入口。密码在下一步的系统弹窗中输入。</p>
+<label class="field-label">服务器地址<input id="server-host" type="text" autocomplete="off" placeholder="例如 192.0.2.10"></label>
+<label class="field-label">平台登录用户名<input id="server-user" type="text" autocomplete="off" placeholder="平台提供的用户名"></label>
+<label class="field-label">SSH 端口<input id="server-port" type="number" min="1" max="65535" value="22"></label>
+<div id="server-account">
+<p class="note">用新 SSH 账户核实实际 Linux 用户和家目录，并在该账户授权新 Mac 的 SSH 公钥。</p>
+<label class="field-label">实际 Linux 用户<input id="server-inner-user" type="text" autocomplete="off" placeholder="服务器上 id -un 的结果"></label>
+<label class="field-label">远端家目录<input id="server-home" type="text" autocomplete="off" placeholder="例如 /home/your-user"></label>
+<label class="field-label">本机 SSH 私钥路径<input id="server-identity" type="text" autocomplete="off" placeholder="例如 ~/.ssh/id_ed25519_ccen"></label>
+</div>
+<p class="note" id="server-switch-note">更换后会断开当前 CCEN 通道。先结束依赖旧连接的工作，再点击连接新节点。</p>
+<button class="primary wide" id="save-server">保存并连接</button>
+</dialog>
 <dialog id="disconnect-dialog"><div class="dialog-head"><h2>断开服务器？</h2></div><p>这会断开两个桌面应用使用的 CCEN 通道。本机浏览器守卫继续运行。</p><div class="card-actions"><button class="secondary" id="cancel-disconnect">取消</button><button class="primary" id="confirm-disconnect">断开连接</button></div></dialog>
 <dialog id="guide"><div class="dialog-head"><h2>把 AdsPower 接入守卫</h2><button id="close-guide" class="icon-button">×</button></div><p>在 AdsPower 中编辑需要接入的环境，将代理设为 HTTP，主机 127.0.0.1，端口 17899，账号和密码留空。</p><p>保存后重新打开环境，并关闭该环境的 WebRTC 与 QUIC。守卫管理经过它的代理连接。</p></dialog>
 <div id="toast" role="status"></div><script>// APP_SCRIPT</script></body></html>

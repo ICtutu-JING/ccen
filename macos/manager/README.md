@@ -10,7 +10,7 @@ macOS AppKit 菜单栏应用，使用 WKWebView 展示本机守卫、服务器�
 
 新 Mac 首次安装、迁移到同一台服务器、准备 SSH 公钥和检查模型登录，见 [换电脑安装教程](../../docs/install-on-another-computer.md)。
 
-下载 [macOS Apple Silicon ZIP](https://github.com/ICtutu-JING/ccen/releases/tag/macos-2026.11.06.1)，解压后把应用拖到“应用程序”。已经在这台 Mac 上配置过 CCEN，可继续使用应用数据和 SSH 配置。
+下载 [macOS Apple Silicon ZIP](https://github.com/ICtutu-JING/ccen/releases/tag/macos-2026.11.20)，解压后把应用拖到“应用程序”。已经在这台 Mac 上配置过 CCEN，可继续使用应用数据和 SSH 配置。
 
 | 设置 | 这台 Mac 的配置 |
 | --- | --- |
@@ -21,7 +21,7 @@ macOS AppKit 菜单栏应用，使用 WKWebView 展示本机守卫、服务器�
 | 固定出口地区 | `US / IAD` |
 | 守卫 / 登录 Mac 后启动 | 开启 / 开启 |
 
-首次打开时，在应用生成的 `deployment.json` 中填入自己的固定出口 IP，确认 Clash 监听端口后重新打开。新设备接入 SSH 时，从 [节点配置示例](ccen-target.example.json) 创建 `~/.ssh/ccen-target.json`，填写网关、实际用户、共享家目录及已授权的本机密钥路径。在 `~/.ssh/config` 的主机块之前加入 `Include ~/.ssh/ccen.conf`。初次连接成功后，应用生成 `ccen.conf`。
+首次打开时，在应用生成的 `deployment.json` 中填入自己的固定出口 IP，确认 Clash 监听端口后重新打开。新设备可从“我的服务器 → 添加服务器”填写网关、实际 Linux 用户、家目录和本机私钥路径。CCEN 保存配置并加入 SSH 别名的 Include，随后弹出密码窗口。[服务器字段说明](../../docs/install-on-another-computer.md#3-让新-mac-连接目标-ssh-账户)
 
 ## 已有部署的日常使用
 

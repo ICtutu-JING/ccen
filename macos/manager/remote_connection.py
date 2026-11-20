@@ -16,6 +16,7 @@ TARGET = DIRECTORY / 'ccen-target.json'
 CONTROL = DIRECTORY / 'ccen-master.sock'
 CONFIG = DIRECTORY / 'ccen.conf'
 KNOWN_HOSTS = DIRECTORY / 'ccen-known-hosts'
+SSH_INCLUDE = 'Include ~/.ssh/ccen.conf'
 
 PROBE = r'''
 import concurrent.futures,json,pathlib,subprocess
@@ -41,6 +42,21 @@ def execute(args, timeout=25, **kwargs):
     return result
 
 
+def gateway_endpoint(host, user, port):
+    host, user = host.strip(), user.strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.:][A-Za-z0-9_.:-]*', host):
+        raise ValueError('服务器地址格式不正确。')
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', user):
+        raise ValueError('登录用户名格式不正确。')
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise ValueError('SSH 端口必须是 1 到 65535 之间的整数。') from None
+    if not 1 <= port <= 65535:
+        raise ValueError('SSH 端口必须是 1 到 65535 之间的整数。')
+    return dict(host=host, user=user, port=port)
+
+
 class RemoteConnection:
     def __init__(self, log, prompt):
         self.log = log
@@ -52,9 +68,12 @@ class RemoteConnection:
         self.last_check = 0
 
     def snapshot(self):
+        account = (dict(inner_user=self.config['inner_user'], identity=self.config['identity'])
+                   if self.config and not self.config.get('last_node') else {})
         return dict(self.state, configured=self.config is not None,
                     gateway=self.config['gateway'] if self.config else {},
                     folder=self.config['shared_home'] if self.config else '',
+                    account=account,
                     node=self.config.get('last_node', '') if self.config else '')
 
     def control(self, action):
@@ -73,7 +92,10 @@ class RemoteConnection:
 
     def _check(self):
         old = self.state['connected']
-        if self.config is None or self.control('check').returncode:
+        if self.config is None:
+            self.state.update(phase='needs_setup', message='点击“添加服务器”，填写 SSH 入口、实际 Linux 用户、家目录和密钥路径。')
+            return
+        if self.control('check').returncode:
             if self.state['phase'] == 'connection_failed':
                 return
             self.state = dict(connected=False, phase='needs_connection', message='点击“连接服务器”，在弹窗输入当次密码。',
@@ -94,14 +116,48 @@ class RemoteConnection:
         if old != self.state['connected']:
             self.log('服务器连接已恢复。' if self.state['connected'] else '服务器连接已中断，请点击连接服务器。')
 
+    def configure(self, host, user, port, account):
+        """Save the initial account and add the managed alias to OpenSSH."""
+        gateway = gateway_endpoint(host, user, port)
+        inner_user = account['inner_user'].strip()
+        shared_home = account['shared_home'].strip()
+        identity = Path(account['identity'].strip()).expanduser()
+        if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', inner_user):
+            raise ValueError('请填写正确的实际 Linux 用户名。')
+        if not shared_home.startswith('/') or any(c in shared_home for c in '\r\n'):
+            raise ValueError('请填写 Linux 家目录的绝对路径。')
+        if not identity.is_absolute() or any(c in str(identity) for c in '"\r\n'):
+            raise ValueError('请填写本机 SSH 私钥的绝对路径或以 ~/ 开头的路径。')
+        if identity.suffix == '.pub' or not identity.is_file():
+            raise ValueError('找不到 SSH 私钥。请填写已授权公钥对应的本机私钥路径。')
+
+        with self.lock:
+            if self.config and self.config.get('last_node'):
+                raise RuntimeError('已配置服务器，请使用“更换节点”。')
+            DIRECTORY.mkdir(mode=0o700, parents=True, exist_ok=True)
+            ssh_config = DIRECTORY / 'config'
+            existing = ssh_config.read_bytes() if ssh_config.exists() else b''
+            include = SSH_INCLUDE.encode()
+            global_config = re.split(rb'(?im)^\s*(?:host|match)\s+', existing, maxsplit=1)[0]
+            if include not in (line.strip() for line in global_config.splitlines()):
+                ssh_config.touch(mode=0o600, exist_ok=True)
+                ssh_config.write_bytes(include + b'\n' + existing)
+
+            config = dict(gateway=gateway, inner_user=inner_user, shared_home=shared_home,
+                          identity=str(identity))
+            TARGET.touch(mode=0o600, exist_ok=True)
+            TARGET.write_text(json.dumps(config, ensure_ascii=False, indent=2)+'\n')
+            self.config = config
+            self.state.update(phase='needs_connection', message='服务器已添加，点击“连接服务器”登录。')
+            self.log('已添加服务器配置。')
+
     def connect(self, host=None, user=None, port=None):
         if self.config is None:
-            return dict(ok=False, error='尚未完成这台 Mac 的 SSH 密钥和共享目录配置。')
-        endpoint = dict(self.config['gateway']) if host is None else dict(host=host.strip(), user=user.strip(), port=int(port))
-        if not re.fullmatch(r'[A-Za-z0-9_.:-]+', endpoint['host']) or endpoint['host'].startswith('-'):
-            return dict(ok=False, error='服务器地址格式不正确。')
-        if not re.fullmatch(r'[A-Za-z0-9_.-]+', endpoint['user']) or not 1 <= endpoint['port'] <= 65535:
-            return dict(ok=False, error='用户名或端口格式不正确。')
+            return dict(ok=False, error='请先点击“添加服务器”。')
+        try:
+            endpoint = dict(self.config['gateway']) if host is None else gateway_endpoint(host, user, port)
+        except ValueError as error:
+            return dict(ok=False, error=str(error))
         with self.lock:
             previous = dict(self.state)
             password = None
