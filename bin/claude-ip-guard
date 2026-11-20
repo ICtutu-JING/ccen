@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DAEMON="$HOME/.local/libexec/claude-ip-gate"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/claude-ip-gate"
+STATE_FILE="$RUNTIME_DIR/status"
+UNIT="claude-ip-gate.service"
+LOCAL_HOSTNAME="$(hostname)"
+LOCAL_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id)"
+EXPECTED_IP="${CLAUDE_GUARD_EXPECTED_IP:-__CCEN_EXPECTED_IP__}"
+EXPECTED_COUNTRY="${CLAUDE_GUARD_EXPECTED_CF_COUNTRY:-__CCEN_COUNTRY__}"
+EXPECTED_COLO="${CLAUDE_GUARD_EXPECTED_CF_COLO:-__CCEN_ANTHROPIC_COLO__}"
+FRESH_STATE_SECONDS=10
+
+if [[ "$EXPECTED_IP" == *'__CCEN_'* || "$EXPECTED_COUNTRY" == *'__CCEN_'* ||
+      "$EXPECTED_COLO" == *'__CCEN_'* ]]; then
+    echo "[BLOCKED] Render this deployment with tools/render-linux.py before use." >&2
+    exit 1
+fi
+
+state_value() {
+    local key="$1"
+    [[ -r "$STATE_FILE" ]] || return 0
+    sed -n "s/^${key}=//p" "$STATE_FILE" | tail -n 1
+}
+
+show_status() {
+    if [[ -r "$STATE_FILE" ]]; then
+        cat "$STATE_FILE"
+    else
+        echo "status=unknown"
+    fi
+    printf 'gate_service=%s\n' \
+        "$(systemctl --user is-active "$UNIT" 2>/dev/null || true)"
+    systemctl --user show "$UNIT" \
+        --property=MainPID \
+        --property=SubState \
+        --no-pager 2>/dev/null || true
+}
+
+load_state_fields() {
+    local key
+    local state_snapshot
+    local value
+
+    status=""
+    checked_epoch=""
+    reason=""
+    ipify_ip=""
+    cloudflare_ip=""
+    cloudflare_country=""
+    cloudflare_colo=""
+    anthropic_colo=""
+    upstream_proxy=""
+    daemon_pid=""
+    state_hostname=""
+    state_boot_id=""
+    tcp_listener=""
+    uds_listener=""
+
+    state_snapshot="$(cat -- "$STATE_FILE" 2>/dev/null || true)"
+    while IFS='=' read -r key value; do
+        case "$key" in
+            status) status="$value" ;;
+            checked_epoch) checked_epoch="$value" ;;
+            reason) reason="$value" ;;
+            ipify_ip) ipify_ip="$value" ;;
+            cloudflare_ip) cloudflare_ip="$value" ;;
+            cloudflare_country) cloudflare_country="$value" ;;
+            cloudflare_colo) cloudflare_colo="$value" ;;
+            anthropic_colo) anthropic_colo="$value" ;;
+            upstream_proxy) upstream_proxy="$value" ;;
+            daemon_pid) daemon_pid="$value" ;;
+            hostname) state_hostname="$value" ;;
+            boot_id) state_boot_id="$value" ;;
+            tcp_listener) tcp_listener="$value" ;;
+            uds_listener) uds_listener="$value" ;;
+        esac
+    done <<<"$state_snapshot"
+}
+
+state_is_fresh_allowed() {
+    local required_epoch="$1"
+    local required_pid="$2"
+
+    [[ "$status" == "allowed" &&
+       "$reason" == "all checks passed" &&
+       "$checked_epoch" =~ ^[0-9]+$ &&
+       "$checked_epoch" -ge "$required_epoch" &&
+       "$daemon_pid" =~ ^[0-9]+$ &&
+       "$daemon_pid" == "$required_pid" &&
+       "$state_hostname" == "$LOCAL_HOSTNAME" &&
+       "$state_boot_id" == "$LOCAL_BOOT_ID" &&
+       "$ipify_ip" == "$EXPECTED_IP" &&
+       "$cloudflare_ip" == "$EXPECTED_IP" &&
+       "$cloudflare_country" == "$EXPECTED_COUNTRY" &&
+       "$anthropic_colo" == "$EXPECTED_COLO" &&
+       "$upstream_proxy" == "http://127.0.0.1:7899" &&
+       "$tcp_listener" == "active" &&
+       "$uds_listener" == "active" &&
+       -S "$RUNTIME_DIR/proxy.sock" ]]
+}
+
+print_allowed_state() {
+    printf '[OK] %s (%s/%s, Anthropic %s, upstream %s)\n' \
+        "$ipify_ip" \
+        "$cloudflare_country" \
+        "$cloudflare_colo" \
+        "$anthropic_colo" \
+        "${upstream_proxy##*:}"
+}
+
+enforce() {
+    local check_started
+    local current_state_stamp
+    local deadline
+    local previous_state_stamp
+    local main_pid
+    local verified_main_pid
+
+    mkdir -p "$RUNTIME_DIR"
+    chmod 0700 "$RUNTIME_DIR"
+    exec 9>"$RUNTIME_DIR/guard.lock"
+    if ! /usr/bin/flock --exclusive --wait 45 9; then
+        echo "[BLOCKED] Timed out waiting for the Claude IP guard lock." >&2
+        return 1
+    fi
+
+    if ! systemctl --user start "$UNIT"; then
+        echo "[BLOCKED] Could not start the Claude IP gate." >&2
+        return 1
+    fi
+
+    main_pid="$(
+        systemctl --user show "$UNIT" \
+            --property=MainPID \
+            --value 2>/dev/null || true
+    )"
+    if [[ ! "$main_pid" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[BLOCKED] Claude IP gate has no valid main process." >&2
+        return 1
+    fi
+
+    # Concurrent VS Code/CLI launches share one very recent verified result.
+    # This prevents a burst of launchers from interrupting one another's curl
+    # probes with overlapping HUP requests.
+    check_started="$(date +%s)"
+    load_state_fields
+    if state_is_fresh_allowed "$((check_started - FRESH_STATE_SECONDS))" "$main_pid"; then
+        print_allowed_state
+        return 0
+    fi
+
+    previous_state_stamp="$(
+        stat -c '%y:%s' "$STATE_FILE" 2>/dev/null || true
+    )"
+
+    # Signal only the daemon PID. systemctl kill can signal probe subprocesses
+    # on older systemd builds, producing false curl failures and route churn.
+    verified_main_pid="$(
+        systemctl --user show "$UNIT" \
+            --property=MainPID \
+            --value 2>/dev/null || true
+    )"
+    if [[ "$verified_main_pid" != "$main_pid" ]]; then
+        echo "[BLOCKED] Claude IP gate changed process during verification." >&2
+        return 1
+    fi
+    if ! /bin/kill -HUP "$main_pid" 2>/dev/null; then
+        echo "[BLOCKED] Could not request a fresh Claude IP gate check." >&2
+        return 1
+    fi
+
+    deadline=$((SECONDS + 30))
+    while (( SECONDS <= deadline )); do
+        main_pid="$(
+            systemctl --user show "$UNIT" \
+                --property=MainPID \
+                --value 2>/dev/null || true
+        )"
+        current_state_stamp="$(
+            stat -c '%y:%s' "$STATE_FILE" 2>/dev/null || true
+        )"
+        load_state_fields
+
+        if [[ "$current_state_stamp" != "$previous_state_stamp" ]] &&
+           state_is_fresh_allowed "$check_started" "$main_pid"; then
+            print_allowed_state
+            return 0
+        fi
+        sleep 0.25
+    done
+
+    echo "[BLOCKED] Claude IP gate did not reach a fresh allowed state." >&2
+    show_status >&2
+    return 1
+}
+
+case "${1:-enforce}" in
+    check)
+        exec /usr/bin/python3 -I "$DAEMON" --check
+        ;;
+    enforce)
+        enforce
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "Usage: claude-ip-guard [enforce|check|status]" >&2
+        exit 2
+        ;;
+esac

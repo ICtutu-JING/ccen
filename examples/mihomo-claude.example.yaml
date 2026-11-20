@@ -1,0 +1,24 @@
+# Merge fragment for Mihomo. Replace placeholders only in a PRIVATE copy.
+# This is not an exported Clash Verge profile and contains no working credentials.
+listeners:
+  - name: claude-fixed-entry
+    type: mixed
+    listen: 127.0.0.1
+    port: 7899
+    proxy: claude-residential
+    udp: false
+
+proxies:
+  - name: claude-residential
+    type: socks5
+    server: residential-proxy.example.invalid
+    port: 1080
+    username: REPLACE_WITH_YOUR_USERNAME
+    password: REPLACE_WITH_YOUR_PASSWORD
+    udp: false
+    # Define YOUR_EXISTING_TRANSPORT_GROUP in your existing private config.
+    # Remove dialer-proxy if your network can reach the residential server directly.
+    dialer-proxy: YOUR_EXISTING_TRANSPORT_GROUP
+
+# No DIRECT / general proxy fallback is added to this listener.
+# Existing unrelated proxies, groups, DNS and rules belong to your private config.

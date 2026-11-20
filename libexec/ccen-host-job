@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Trusted result shim for one CCEN host job.
+
+This process is the transient service's main process.  It verifies the launch
+record hash supplied by the broker, starts the approved command inside a mount
+and PID sandbox that keeps the host network/device view, forwards termination,
+and atomically records the real command result before exiting.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import re
+from pathlib import Path
+from typing import Any, Optional
+
+
+MAX_LAUNCH = 256 * 1024
+_child: Optional[subprocess.Popen[bytes]] = None
+_received_signal: Optional[int] = None
+
+
+def timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def atomic_json(path: Path, value: Any) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def load_launch(path: Path, expected_hash: str) -> dict[str, Any]:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or metadata.st_size > MAX_LAUNCH
+        ):
+            raise RuntimeError("launch record has unsafe metadata")
+        chunks: list[bytes] = []
+        remaining = MAX_LAUNCH + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    if len(payload) > MAX_LAUNCH:
+        raise RuntimeError("launch record is too large")
+    if hashlib.sha256(payload).hexdigest() != expected_hash:
+        raise RuntimeError("launch record hash mismatch")
+    try:
+        launch = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("launch record is invalid JSON") from error
+    expected_keys = {
+        "version",
+        "job_id",
+        "command",
+        "working_directory",
+        "environment",
+        "policy_path",
+        "state_root",
+    }
+    if not isinstance(launch, dict) or set(launch) != expected_keys:
+        raise RuntimeError("launch record has an invalid schema")
+    if launch.get("version") != 1:
+        raise RuntimeError("launch record version is unsupported")
+    command = launch.get("command")
+    environment = launch.get("environment")
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(item, str) and item and "\0" not in item for item in command)
+        or not isinstance(environment, dict)
+        or not all(
+            isinstance(key, str)
+            and isinstance(value, str)
+            and "\0" not in key
+            and "\0" not in value
+            for key, value in environment.items()
+        )
+    ):
+        raise RuntimeError("launch command or environment is invalid")
+    for key in ("working_directory", "policy_path", "state_root"):
+        value = launch.get(key)
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise RuntimeError(f"launch {key} is invalid")
+    return launch
+
+
+def forward_signal(signum: int, _frame: object) -> None:
+    global _received_signal
+    _received_signal = signum
+    child = _child
+    if child is not None and child.poll() is None:
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+
+def install_signal_handlers() -> None:
+    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
+        signal.signal(signum, forward_signal)
+
+
+def main() -> int:
+    global _child
+    if len(sys.argv) != 4:
+        print("ccen-host-job: invalid argument vector", file=sys.stderr)
+        return 64
+    launch_path = Path(sys.argv[1])
+    expected_hash = sys.argv[2]
+    result_path = Path(sys.argv[3])
+    if (
+        not launch_path.is_absolute()
+        or not result_path.is_absolute()
+        or launch_path.parent != result_path.parent
+        or result_path.name != "result.json"
+        or len(expected_hash) != 64
+    ):
+        print("ccen-host-job: invalid state paths", file=sys.stderr)
+        return 64
+
+    started_at = timestamp()
+    started_epoch = time.time()
+    result: dict[str, Any] = {
+        "version": 1,
+        "job_id": launch_path.parent.name,
+        "started_at": started_at,
+        "finished_at": started_at,
+        "returncode": 125,
+        "signal": None,
+        "outcome": "shim-error",
+        "error": "job shim did not reach command execution",
+    }
+    try:
+        launch = load_launch(launch_path, expected_hash)
+        if not re.fullmatch(r"job-[0-9a-f]{32}", launch["job_id"]):
+            raise RuntimeError("launch job id is invalid")
+        if result["job_id"] != launch["job_id"]:
+            raise RuntimeError("launch job id does not match its state directory")
+        install_signal_handlers()
+
+        current_uid = os.getuid()
+        runtime_user = Path(f"/run/user/{current_uid}")
+        bwrap_command = [
+            "/usr/bin/bwrap",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--die-with-parent",
+            "--bind",
+            "/",
+            "/",
+        ]
+        if runtime_user.is_dir():
+            bwrap_command.extend(("--tmpfs", str(runtime_user)))
+        policy_path = Path(launch["policy_path"])
+        if policy_path.exists():
+            bwrap_command.extend(("--ro-bind", "/dev/null", str(policy_path)))
+        state_root = Path(launch["state_root"])
+        if state_root.is_dir():
+            bwrap_command.extend(("--tmpfs", str(state_root)))
+        bwrap_command.extend(
+            (
+                "--dev-bind",
+                "/dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--chdir",
+                launch["working_directory"],
+                "--",
+                *launch["command"],
+            )
+        )
+
+        print(f"ccen_host_job={launch['job_id']} started={started_at}", flush=True)
+        _child = subprocess.Popen(
+            bwrap_command,
+            stdin=subprocess.DEVNULL,
+            stdout=None,
+            stderr=None,
+            env=launch["environment"],
+            close_fds=True,
+            start_new_session=True,
+        )
+        returncode = _child.wait()
+        result.update(
+            {
+                "finished_at": timestamp(),
+                "duration_seconds": round(time.time() - started_epoch, 3),
+                "returncode": returncode if returncode >= 0 else 128 + (-returncode),
+                "signal": -returncode if returncode < 0 else _received_signal,
+                "outcome": "succeeded" if returncode == 0 else "failed",
+                "error": None,
+            }
+        )
+    except BaseException as error:
+        result.update(
+            {
+                "finished_at": timestamp(),
+                "duration_seconds": round(time.time() - started_epoch, 3),
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        print(f"ccen-host-job: {result['error']}", file=sys.stderr, flush=True)
+    finally:
+        try:
+            atomic_json(result_path, result)
+        except BaseException as error:
+            print(f"ccen-host-job: cannot persist result: {error}", file=sys.stderr)
+            return 125
+
+    return int(result["returncode"])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

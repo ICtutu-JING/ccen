@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CCEN macOS deployment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "remote_enabled",
+    "residential_port",
+    "ordinary_port",
+    "expected_ip",
+    "expected_country",
+    "expected_colo"
+  ],
+  "properties": {
+    "ssh_alias": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected_ip": {
+      "type": "string",
+      "format": "ipv4"
+    },
+    "expected_country": {
+      "type": "string",
+      "pattern": "^[A-Z]{2}$"
+    },
+    "expected_colo": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "remote_path": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "remote_enabled": {
+      "type": "boolean"
+    },
+    "residential_port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "ordinary_port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "remote_enabled": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "ssh_alias",
+          "remote_path"
+        ]
+      }
+    }
+  ]
+}

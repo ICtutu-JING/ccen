@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Claude / Codex 连接管理器</title><style>/* APP_STYLE */</style></head>
+<body>
+<aside><div class="brand"><span class="brand-icon">✓</span><div>Claude / Codex<span>连接管理器</span></div></div>
+<div class="nav-label">工作台</div><button class="nav active" data-page="overview"><span>◈</span> 连接总览</button><button class="nav" data-page="activity"><span>≡</span> 运行记录</button>
+<div class="sidebar-bottom"><span class="live-dot"></span> 本机管理 · macOS<div>关闭窗口后在菜单栏继续运行</div></div></aside>
+<main>
+<header><div><div class="eyebrow">CLAUDE / CODEX CONNECTION MANAGER</div><h1 id="page-title">连接总览</h1><p>连接一次，在 Mac 桌面应用里使用服务器；这里持续检查网络。</p></div><button class="secondary" id="refresh">↻ 检查链路</button></header>
+<section id="overview" class="page">
+<div class="exit-banner"><div class="exit-mark">⌾</div><div><span class="caption">Claude 固定住宅出口</span><div class="exit-address"><b id="expected-ip">等待配置</b> <span id="expected-region">—</span></div></div><span class="pill dark">出口不符即阻断</span></div>
+<article class="server-bar"><div><span class="caption">我的服务器</span><h2 id="server-address">正在读取</h2><p id="server-detail">—</p></div><div class="server-actions"><span id="server-badge" class="pill neutral">检查中</span><button class="primary" id="connect-server">连接服务器</button><button class="secondary" id="change-server">更换节点</button><button class="text-button" id="disconnect-server">断开连接</button></div><div id="server-message" class="server-message">正在检查实际连接。</div></article>
+<div class="connection-grid">
+<article class="card"><div class="card-top"><div class="card-icon">◇</div><span id="guard-badge" class="pill neutral">检查中</span></div><div class="overline">CLAUDE / 浏览器</div><h2>住宅出口守卫</h2><p class="card-sub">AdsPower 和远端 Claude 共用本机守卫。</p>
+<div class="flow"><span>浏览器 / 远端 Claude</span><i>→</i><b>本机守卫</b><i>→</i><span>固定住宅</span></div>
+<div class="metrics"><div><label>本机实测出口</label><strong id="guard-ip">—</strong></div><div><label>地区 / Claude 节点</label><strong id="guard-region">—</strong></div></div>
+<div class="message" id="guard-message">正在核验。</div>
+<div class="card-actions"><button class="primary" id="guard-toggle">启动守卫</button><button class="text-button" id="adspower-guide">AdsPower 接入说明</button></div>
+<footer><span class="dot" id="guard-dot"></span><span id="guard-foot">等待连接</span></footer></article>
+<article class="card"><div class="card-top"><div class="card-icon blue">⇄</div><span id="remote-badge" class="pill neutral">检查中</span></div><div class="overline">MAC 桌面应用 / 服务器</div><h2>远端应用网络</h2><p class="card-sub">打开桌面应用，选择已保存的 ccen 服务器。</p>
+<div class="health-row"><span>Claude 远端住宅出口</span><b id="remote-claude">等待连接</b></div><div class="health-row"><span>Codex 远端代理</span><b id="remote-codex">等待连接</b></div><div class="health-row"><span>最近实测</span><b id="remote-checked">—</b></div>
+<div class="message" id="remote-message">连接后自动检查两条远端代理。</div>
+<div class="card-actions desktop-actions"><button class="primary" id="open-codex">打开 Codex</button><button class="primary" id="open-claude">打开 Claude Code</button></div>
+<footer><span class="dot" id="remote-dot"></span><span>Mac、Clash 和本机守卫需保持在线</span></footer></article>
+</div>
+<div class="bottom-grid"><article class="small-card"><h3>第一次使用桌面应用</h3><p class="simple-help"><b>Codex：</b>设置 → 连接 → 启用 <b>ccen</b>，选择服务器里的项目文件夹。以后直接打开该项目。</p><p class="simple-help"><b>Claude：</b>点击上方按钮，在桌面应用登录订阅账号，确认 <b>ccen</b> 连接并选择项目。无需命令行授权。</p></article>
+<article class="small-card settings"><h3>后台运行</h3><label class="switch-row"><div><strong>登录 macOS 后启动</strong><p>自动启动守卫；需要服务器密码时点击连接。</p></div><input id="startup" type="checkbox" role="switch"></label><div class="note">换节点只需填写新地址和当次密码。相同共享家目录可沿用工具和配置。状态代表链路实测结果，首次账号登录需在应用中完成。</div></article></div>
+<div class="latest"><span>最近动态</span><div id="latest-event">正在读取状态…</div><time id="updated">—</time></div>
+</section>
+<section id="activity" class="page hidden"><article class="card activity-card"><div class="activity-head"><div><h2>运行记录</h2><p class="card-sub">记录连接状态，不记录密码和聊天内容。</p></div><button class="secondary" id="open-logs">打开日志目录</button></div><div id="event-list"></div></article></section>
+</main>
+<dialog id="server-dialog"><div class="dialog-head"><h2>更换服务器节点</h2><button id="close-server" class="icon-button">×</button></div><p>填写平台新分配的服务器信息。密码在下一步的系统弹窗中输入。</p><label class="field-label">服务器地址<input id="server-host" type="text" autocomplete="off" placeholder="例如 192.0.2.10"></label><label class="field-label">登录用户名<input id="server-user" type="text" autocomplete="off" placeholder="平台提供的用户名"></label><label class="field-label">SSH 端口<input id="server-port" type="number" min="1" max="65535" value="22"></label><p class="note">更换后会断开当前 CCEN 通道。先结束依赖旧连接的工作，再点击连接新节点。</p><button class="primary wide" id="save-server">连接新节点</button></dialog>
+<dialog id="disconnect-dialog"><div class="dialog-head"><h2>断开服务器？</h2></div><p>这会断开两个桌面应用使用的 CCEN 通道。本机浏览器守卫继续运行。</p><div class="card-actions"><button class="secondary" id="cancel-disconnect">取消</button><button class="primary" id="confirm-disconnect">断开连接</button></div></dialog>
+<dialog id="guide"><div class="dialog-head"><h2>把 AdsPower 接入守卫</h2><button id="close-guide" class="icon-button">×</button></div><p>在 AdsPower 中编辑需要接入的环境，将代理设为 HTTP，主机 127.0.0.1，端口 17899，账号和密码留空。</p><p>保存后重新打开环境，并关闭该环境的 WebRTC 与 QUIC。守卫管理经过它的代理连接。</p></dialog>
+<div id="toast" role="status"></div><script>// APP_SCRIPT</script></body></html>

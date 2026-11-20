@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""claude-lab-ssh-relay <fpga01|fpga02|fpga05|fpga06>: one user-private Unix socket per host, relaying only to that host:22.
+
+Copied from claude-fpga03-ssh-relay and parameterised (2026-10-15). Sockets live in the fpga04 relay
+runtime directory, which is already bind-mounted into the Claude container as /run/claude-fpga04-ssh-relay/,
+so no new container mount is needed."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import signal
+import socket
+import stat
+import struct
+import sys
+from pathlib import Path
+
+
+EXPECTED_UID = __CCEN_UID__
+HOSTS = {
+    "fpga01": "__CCEN_FPGA01_IP__",
+    "fpga02": "__CCEN_FPGA02_IP__",
+    "fpga05": "__CCEN_FPGA05_IP__",
+    "fpga06": "__CCEN_FPGA06_IP__",
+}
+if len(sys.argv) != 2 or sys.argv[1] not in HOSTS:
+    raise SystemExit("usage: claude-lab-ssh-relay <" + "|".join(HOSTS) + ">")
+NAME = sys.argv[1]
+SOCKET_DIR = Path("/run/user/__CCEN_UID__/claude-fpga04-ssh-relay")
+SOCKET_PATH = SOCKET_DIR / f"{NAME}.sock"
+TARGET_HOST = HOSTS[NAME]
+TARGET_PORT = 22
+
+
+async def copy_stream(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> None:
+    try:
+        while data := await reader.read(64 * 1024):
+            writer.write(data)
+            await writer.drain()
+    except (BrokenPipeError, ConnectionError, asyncio.CancelledError):
+        pass
+
+
+def peer_is_allowed(writer: asyncio.StreamWriter) -> bool:
+    peer_socket = writer.get_extra_info("socket")
+    if peer_socket is None:
+        return False
+    credential_size = struct.calcsize("3i")
+    credentials = peer_socket.getsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_PEERCRED,
+        credential_size,
+    )
+    _pid, uid, _gid = struct.unpack("3i", credentials)
+    return uid == EXPECTED_UID
+
+
+async def close_writer(writer: asyncio.StreamWriter) -> None:
+    writer.close()
+    with contextlib.suppress(BrokenPipeError, ConnectionError, OSError):
+        await writer.wait_closed()
+
+
+async def handle_connection(
+    client_reader: asyncio.StreamReader,
+    client_writer: asyncio.StreamWriter,
+) -> None:
+    if not peer_is_allowed(client_writer):
+        await close_writer(client_writer)
+        return
+
+    try:
+        target_reader, target_writer = await asyncio.open_connection(
+            TARGET_HOST,
+            TARGET_PORT,
+        )
+    except OSError as exc:
+        print(f"{NAME} relay connect failed: {exc}", file=sys.stderr)
+        await close_writer(client_writer)
+        return
+
+    tasks = {
+        asyncio.create_task(copy_stream(client_reader, target_writer)),
+        asyncio.create_task(copy_stream(target_reader, client_writer)),
+    }
+    try:
+        _done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        await asyncio.gather(
+            close_writer(target_writer),
+            close_writer(client_writer),
+            return_exceptions=True,
+        )
+
+
+def remove_stale_socket() -> None:
+    try:
+        mode = SOCKET_PATH.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(mode):
+        raise RuntimeError(f"refusing to replace non-socket path: {SOCKET_PATH}")
+    SOCKET_PATH.unlink()
+
+
+async def main() -> None:
+    if os.getuid() != EXPECTED_UID:
+        raise RuntimeError("refusing to run as an unexpected uid")
+    directory_stat = SOCKET_DIR.stat()
+    if directory_stat.st_uid != EXPECTED_UID:
+        raise RuntimeError("runtime directory has an unexpected owner")
+
+    remove_stale_socket()
+    server = await asyncio.start_unix_server(
+        handle_connection,
+        path=SOCKET_PATH,
+    )
+    os.chmod(SOCKET_PATH, 0o600)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop.set)
+
+    try:
+        async with server:
+            await stop.wait()
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            SOCKET_PATH.unlink()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

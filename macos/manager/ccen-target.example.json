@@ -1,0 +1,10 @@
+{
+  "gateway": {
+    "host": "192.0.2.10",
+    "port": 6988,
+    "user": "your-gateway-user"
+  },
+  "identity": "~/.ssh/id_ed25519_ccen",
+  "inner_user": "your-user",
+  "shared_home": "/home/your-user"
+}

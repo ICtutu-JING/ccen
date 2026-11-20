@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Claude / Codex 连接管理器</title><style>/* APP_STYLE */</style></head>
+<body>
+<aside><div class="brand"><span class="brand-icon">✓</span><div>Claude / Codex<span>连接管理器</span></div></div>
+<div class="nav-label">工作台</div><button class="nav active" data-page="overview"><span>◈</span> 连接总览</button><button class="nav" data-page="activity"><span>≡</span> 运行记录</button>
+<div class="sidebar-bottom"><span class="live-dot"></span> 本机管理 · Windows<div>关闭窗口后在托盘继续运行</div></div></aside>
+<main>
+<header><div><div class="eyebrow">CLAUDE / CODEX CONNECTION MANAGER</div><h1 id="page-title">连接总览</h1><p>浏览器守卫与远程代理统一托管，关闭窗口后继续在托盘运行。</p></div><button class="secondary" id="refresh">↻ 检查链路</button></header>
+<section id="overview" class="page">
+<div class="exit-banner"><div class="exit-mark">⌾</div><div><span class="caption">唯一允许的 Claude 出口</span><div class="exit-address"><b id="expected-ip">等待配置</b> <span id="expected-region">—</span></div></div><span class="pill dark">出口异常即阻断</span></div>
+<div class="connection-grid">
+<article class="card"><div class="card-top"><div class="card-icon">◇</div><span id="guard-badge" class="pill neutral">尚未启动</span></div><div class="overline">ADSPOWER / 浏览器</div><h2>住宅出口守卫</h2><p class="card-sub">只有出口核验通过，才允许浏览器联网。</p>
+<div class="flow"><span>浏览器</span><i>→</i><b>本地守卫</b><i>→</i><span>固定住宅</span></div>
+<div class="metrics"><div><label>实测出口</label><strong id="guard-ip">—</strong></div><div><label>地区 / Claude 节点</label><strong id="guard-region">等待核验</strong></div></div>
+<div class="message" id="guard-message">启动后，守卫会先检查 IP、国家和 配置中指定的 Claude 节点。</div>
+<div class="card-actions"><button class="primary" id="guard-toggle">启动守卫</button><button class="text-button" id="adspower-guide">接入 AdsPower ↗</button></div>
+<footer><span class="dot" id="guard-dot"></span><span id="guard-foot">浏览器接入需要在 AdsPower 中设置一次</span></footer></article>
+<article class="card"><div class="card-top"><div class="card-icon blue">⇄</div><span id="ssh-badge" class="pill neutral">检查中</span></div><div class="overline">CLAUDE / LINUX</div><h2>Claude 住宅连接</h2><p class="card-sub">监测住宅代理转发，断开后自动建立新连接。</p>
+<div class="flow"><span>本机住宅</span><i>→</i><b>SSH 隧道</b><i>→</i><span>远端守卫</span></div>
+<div class="metrics"><div><label>远端实测出口</label><strong id="remote-ip">—</strong></div><div><label>自动建立次数</label><strong id="reconnect-count">0 <small>次</small></strong></div></div>
+<div class="message" id="ssh-message">正在检查 远端 的代理端口与出口守卫。</div>
+<div class="card-actions"><button class="primary" id="ssh-toggle">启用自动恢复</button><button class="text-button" id="open-vscode">打开 VS Code ↗</button></div>
+<footer><span class="dot" id="ssh-dot"></span><span id="ssh-foot">当前连接继续沿用</span></footer></article>
+<article class="card codex-card"><div class="card-top"><div class="card-icon blue">⌘</div><span id="codex-badge" class="pill neutral">检查中</span></div><div class="overline">CODEX / LINUX</div><h2>Codex 代理连接</h2><p class="card-sub">由托盘应用维护连接，断线自动重连，无需保留终端。</p>
+<div class="flow"><span>本机普通代理</span><i>→</i><b>SSH 隧道</b><i>→</i><span>远端 Codex</span></div>
+<div class="metrics"><div><label>ChatGPT 连接</label><strong id="codex-health">检查中</strong></div><div><label>自动建立次数</label><strong id="codex-count">0 <small>次</small></strong></div></div>
+<div class="message" id="codex-message">正在检查 Codex 代理链路。</div>
+<div class="card-actions"><button class="primary" id="codex-toggle">启用自动恢复</button></div>
+<footer><span class="dot" id="codex-dot"></span><span id="codex-foot">当前连接继续沿用</span></footer></article>
+</div>
+<div class="bottom-grid"><article class="small-card"><h3>连接体检</h3><div class="health-row"><span>本机住宅代理</span><b id="local-health">检查中</b></div><div class="health-row"><span>远端 SSH 可达性</span><b id="remote-health">检查中</b></div><div class="health-row"><span>远端 出口守卫</span><b id="gate-health">检查中</b></div><div class="health-row"><span>Codex 普通代理</span><b id="codex-proxy-health">检查中</b></div></article>
+<article class="small-card settings"><h3>后台运行</h3><label class="switch-row"><div><strong>登录 Windows 后启动</strong><p>在托盘恢复你已启用的守卫和自动重连。</p></div><input id="startup" type="checkbox" role="switch"></label><div class="note">守卫每 10 秒统一核验，连接读取最近有效结果。检测到出口不符时阻断；独立核验的连接错误单独告警。</div></article></div>
+<div class="latest"><span>最近动态</span><div id="latest-event">应用正在读取实际连接状态…</div><time id="updated">—</time></div>
+</section>
+<section id="activity" class="page hidden"><article class="card activity-card"><div class="activity-head"><div><h2>运行记录</h2><p class="card-sub">连接变化与恢复结果，不记录账号密码和聊天内容。</p></div><button class="secondary" id="open-logs">打开日志目录</button></div><div id="event-list"></div></article><button class="secondary" id="restart-owned">重新建立本应用托管的隧道</button><p class="muted">已有 VS Code 会话与其他程序的隧道由原程序维持。暂停自动恢复不会断开当前连接。</p></section>
+</main>
+<dialog id="guide"><div class="dialog-head"><h2>把 Claude 环境接入守卫</h2><button id="close-guide" class="icon-button">×</button></div><p>在 AdsPower 中编辑用于 Claude 的浏览器环境，将代理设为：</p><div class="proxy-details"><div><span>代理类型</span><b>HTTP</b></div><div><span>代理主机</span><b>127.0.0.1</b></div><div><span>代理端口</span><b>17899</b></div><div><span>账号 / 密码</span><b>留空</b></div></div><p>保存后重新打开该环境。该环境的网页流量将经过固定住宅出口。已有标签页需要重新连接后才受守卫保护。</p><p class="note">请关闭该环境的 WebRTC 与 QUIC。守卫仅管理经过它的 TCP 流量；停止守卫后，该环境应无法联网。</p><button class="primary wide" id="copy-proxy">复制代理地址</button></dialog>
+<div id="toast" role="status"></div><script>// APP_SCRIPT</script></body></html>

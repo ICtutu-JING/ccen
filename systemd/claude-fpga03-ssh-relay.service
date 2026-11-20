@@ -1,0 +1,27 @@
+[Unit]
+Description=Claude Code fixed SSH relay to fpga03
+After=default.target
+ConditionHost=__CCEN_LAB_HOSTNAME__
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I __CCEN_HOME__/.local/libexec/claude-fpga03-ssh-relay
+Restart=always
+RestartSec=2s
+KillMode=control-group
+TimeoutStopSec=5s
+RuntimeDirectory=claude-fpga03-ssh-relay
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+Environment=HOME=__CCEN_HOME__
+Environment=XDG_RUNTIME_DIR=/run/user/__CCEN_UID__
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+[Install]
+WantedBy=default.target

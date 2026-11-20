@@ -1,0 +1,17 @@
+{
+  "http.proxy": "http://127.0.0.1:17898",
+  "http.proxySupport": "override",
+  "http.proxyStrictSSL": true,
+  "http.useLocalProxyConfiguration": false,
+  "http.noProxy": ["localhost", "127.0.0.1", "::1"],
+  "claudeCode.useTerminal": false,
+  "claudeCode.claudeProcessWrapper": "/home/YOUR_USER/.local/bin/claude-net-sandbox",
+  "claudeCode.environmentVariables": [
+    {"name": "http_proxy", "value": "http://127.0.0.1:17898"},
+    {"name": "https_proxy", "value": "http://127.0.0.1:17898"},
+    {"name": "HTTP_PROXY", "value": "http://127.0.0.1:17898"},
+    {"name": "HTTPS_PROXY", "value": "http://127.0.0.1:17898"},
+    {"name": "no_proxy", "value": "localhost,127.0.0.1,::1"},
+    {"name": "NO_PROXY", "value": "localhost,127.0.0.1,::1"}
+  ]
+}

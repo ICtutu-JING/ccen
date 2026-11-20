@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly CLAUDE_RUNTIME_DIR="/run/user/__CCEN_UID__"
+readonly CLAUDE_GATE_DIR="$CLAUDE_RUNTIME_DIR/claude-ip-gate"
+readonly CLAUDE_GATE_SOCKET="$CLAUDE_GATE_DIR/proxy.sock"
+readonly CLAUDE_FPGA03_RELAY_DIR="$CLAUDE_RUNTIME_DIR/claude-fpga03-ssh-relay"
+readonly CLAUDE_FPGA03_RELAY_SOCKET="$CLAUDE_FPGA03_RELAY_DIR/ssh.sock"
+readonly CLAUDE_FPGA04_RELAY_DIR="$CLAUDE_RUNTIME_DIR/claude-fpga04-ssh-relay"
+readonly CLAUDE_FPGA04_RELAY_SOCKET="$CLAUDE_FPGA04_RELAY_DIR/ssh.sock"
+readonly CLAUDE_INNER="__CCEN_HOME__/.local/libexec/claude-net-pid1.py"
+readonly CLAUDE_PRIVATE_CONFIG_DIR="__CCEN_HOME__/.config/ccen"
+readonly CLAUDE_PRIVATE_CONFIG="$CLAUDE_PRIVATE_CONFIG_DIR/ccen.env"
+readonly CLAUDE_HOST_RUNNER_POLICY="$CLAUDE_PRIVATE_CONFIG_DIR/host-runner.json"
+readonly CLAUDE_HOST_RUNNER_STATE="__CCEN_HOME__/.local/state/ccen/host-jobs"
+readonly CLAUDE_LIBEXEC_DIR="__CCEN_HOME__/.local/libexec"
+readonly CLAUDE_BIN_DIR="__CCEN_HOME__/.local/bin"
+readonly CLAUDE_USER_UNIT_DIR="__CCEN_HOME__/.config/systemd/user"
+readonly CLAUDE_USER_CONTROL_UNIT_DIR="__CCEN_HOME__/.config/systemd/user.control"
+readonly CLAUDE_USER_SHARE_UNIT_DIR="__CCEN_HOME__/.local/share/systemd/user"
+readonly CLAUDE_VSCODE_SERVER_ROOT="__CCEN_HOME__/.vscode-server"
+readonly CLAUDE_VSCODE_INSIDERS_ROOT="__CCEN_HOME__/.vscode-server-insiders"
+readonly CLAUDE_VSCODE_MACHINE_SETTINGS="__CCEN_HOME__/.vscode-server/data/Machine/settings.json"
+readonly CLAUDE_PROXY="http://127.0.0.1:17898"
+readonly CLAUDE_NO_PROXY="127.0.0.1,localhost,::1"
+
+die() {
+    printf 'claude-net-launcher: %s\n' "$*" >&2
+    exit 1
+}
+
+require_literal_control_path() {
+    local control_path="$1"
+    local ancestor="$control_path"
+    # A symlink in any ancestor changes what a bind protects. Control paths
+    # must use literal directories; the actual Claude executable is explicitly
+    # excluded so the official native install's version symlink remains valid.
+    while [[ "$ancestor" != "/" && "$ancestor" != "." ]]; do
+        [[ ! -L "$ancestor" ]] || die "protected control path contains a symlink: $ancestor"
+        ancestor="$(dirname -- "$ancestor")"
+    done
+}
+
+(( $# == 1 )) || die "invalid launcher arguments"
+claude_argfile="$1"
+
+case "$claude_argfile" in
+    "$CLAUDE_RUNTIME_DIR"/claude-net-argv.*) ;;
+    *) die "argument file is outside the private runtime directory" ;;
+esac
+[[ -f "$claude_argfile" && ! -L "$claude_argfile" && -O "$claude_argfile" ]] \
+    || die "argument file failed ownership or type validation"
+[[ "$(stat -c '%a' -- "$claude_argfile")" == "600" ]] \
+    || die "argument file has unsafe permissions"
+
+cleanup() {
+    rm -f -- "${claude_argfile:-}"
+}
+trap cleanup EXIT
+
+mapfile -d '' -t claude_records <"$claude_argfile" \
+    || die "cannot read private argument file"
+rm -f -- "$claude_argfile"
+claude_argfile=""
+trap - EXIT
+
+(( ${#claude_records[@]} >= 3 )) || die "empty Claude launch record"
+claude_cwd="${claude_records[0]}"
+claude_passwd_file="${claude_records[1]}"
+claude_argv=("${claude_records[@]:2}")
+unset claude_records
+
+case "$claude_passwd_file" in
+    "$CLAUDE_RUNTIME_DIR"/claude-net-passwd.*) ;;
+    *) die "passwd snapshot is outside the private runtime directory" ;;
+esac
+[[ -f "$claude_passwd_file" && ! -L "$claude_passwd_file" &&
+   -O "$claude_passwd_file" ]] \
+    || die "passwd snapshot failed ownership or type validation"
+[[ "$(stat -c '%a' -- "$claude_passwd_file")" == "600" ]] \
+    || die "passwd snapshot has unsafe permissions"
+
+case "${claude_argv[0]}" in
+    /*) ;;
+    *) die "Claude executable in argument file is not absolute" ;;
+esac
+[[ -f "${claude_argv[0]}" && -x "${claude_argv[0]}" ]] \
+    || die "Claude executable in argument file is unavailable"
+case "$claude_cwd" in
+    /*) ;;
+    *) die "working directory is not absolute" ;;
+esac
+[[ -d "$claude_cwd" ]] || die "working directory is unavailable: $claude_cwd"
+[[ -x /usr/bin/bwrap ]] || die "bubblewrap is unavailable"
+[[ -x /usr/bin/python3 && -r "$CLAUDE_INNER" ]] || die "inner relay is unavailable"
+[[ -d "$CLAUDE_GATE_DIR" && -S "$CLAUDE_GATE_SOCKET" ]] \
+    || die "guarded Unix proxy socket is unavailable"
+[[ -d "$CLAUDE_PRIVATE_CONFIG_DIR" && -O "$CLAUDE_PRIVATE_CONFIG_DIR" ]] \
+    || die "private CCEN configuration directory is unavailable"
+
+for protected_control_path in \
+    "$CLAUDE_PRIVATE_CONFIG_DIR" \
+    "$CLAUDE_LIBEXEC_DIR" \
+    "$CLAUDE_BIN_DIR" \
+    "$CLAUDE_HOST_RUNNER_STATE" \
+    "$CLAUDE_USER_UNIT_DIR" \
+    "$CLAUDE_USER_CONTROL_UNIT_DIR" \
+    "$CLAUDE_USER_SHARE_UNIT_DIR" \
+    "$CLAUDE_VSCODE_SERVER_ROOT" \
+    "$CLAUDE_VSCODE_INSIDERS_ROOT" \
+    "$CLAUDE_VSCODE_MACHINE_SETTINGS" \
+    "$CLAUDE_PRIVATE_CONFIG" \
+    "$CLAUDE_HOST_RUNNER_POLICY" \
+    "$CLAUDE_BIN_DIR/ccen" \
+    "$CLAUDE_BIN_DIR/ccen-host-run" \
+    "$CLAUDE_BIN_DIR/claude-ip-guard" \
+    "$CLAUDE_BIN_DIR/claude-net-sandbox"; do
+    require_literal_control_path "$protected_control_path"
+done
+
+for required_control_directory in \
+    "$CLAUDE_USER_UNIT_DIR" \
+    "$CLAUDE_USER_CONTROL_UNIT_DIR" \
+    "$CLAUDE_USER_SHARE_UNIT_DIR"; do
+    [[ -d "$required_control_directory" && -O "$required_control_directory" ]] \
+        || die "required protected systemd directory is unavailable: $required_control_directory; create it during installation"
+done
+
+host_runner_mask_args=(
+    --ro-bind "$CLAUDE_PRIVATE_CONFIG_DIR" "$CLAUDE_PRIVATE_CONFIG_DIR"
+    --ro-bind "$CLAUDE_LIBEXEC_DIR" "$CLAUDE_LIBEXEC_DIR"
+)
+if [[ -f "$CLAUDE_PRIVATE_CONFIG" && ! -L "$CLAUDE_PRIVATE_CONFIG" ]]; then
+    host_runner_mask_args+=(--ro-bind /dev/null "$CLAUDE_PRIVATE_CONFIG")
+fi
+if [[ -f "$CLAUDE_HOST_RUNNER_POLICY" && ! -L "$CLAUDE_HOST_RUNNER_POLICY" ]]; then
+    host_runner_mask_args+=(--ro-bind /dev/null "$CLAUDE_HOST_RUNNER_POLICY")
+fi
+if [[ -d "$CLAUDE_HOST_RUNNER_STATE" && ! -L "$CLAUDE_HOST_RUNNER_STATE" ]]; then
+    host_runner_mask_args+=(--tmpfs "$CLAUDE_HOST_RUNNER_STATE")
+fi
+for protected_directory in \
+    "$CLAUDE_USER_UNIT_DIR" \
+    "$CLAUDE_USER_CONTROL_UNIT_DIR" \
+    "$CLAUDE_USER_SHARE_UNIT_DIR" \
+    "$CLAUDE_VSCODE_SERVER_ROOT" \
+    "$CLAUDE_VSCODE_INSIDERS_ROOT" \
+    /sys/fs/cgroup; do
+    if [[ -d "$protected_directory" && ! -L "$protected_directory" ]]; then
+        host_runner_mask_args+=(
+            --ro-bind "$protected_directory" "$protected_directory"
+        )
+    fi
+done
+for protected_file in \
+    "$CLAUDE_BIN_DIR/ccen" \
+    "$CLAUDE_BIN_DIR/ccen-host-run" \
+    "$CLAUDE_BIN_DIR/claude-ip-guard" \
+    "$CLAUDE_BIN_DIR/claude-net-sandbox" \
+    "$CLAUDE_VSCODE_MACHINE_SETTINGS"; do
+    if [[ -f "$protected_file" && ! -L "$protected_file" ]]; then
+        host_runner_mask_args+=(--ro-bind "$protected_file" "$protected_file")
+    fi
+done
+
+fpga03_relay_args=()
+if [[ "__CCEN_ENABLE_LAB_RELAYS__" == "1" ]]; then
+    [[ -d "$CLAUDE_FPGA03_RELAY_DIR" && -S "$CLAUDE_FPGA03_RELAY_SOCKET" ]] \
+        || die "fixed fpga03 SSH relay socket is unavailable"
+    [[ -d "$CLAUDE_FPGA04_RELAY_DIR" && -S "$CLAUDE_FPGA04_RELAY_SOCKET" ]] \
+        || die "fixed local-host SSH relay socket is unavailable"
+    fpga03_relay_args=(
+        --dir /run/claude-fpga03-ssh-relay
+        --ro-bind "$CLAUDE_FPGA03_RELAY_DIR" /run/claude-fpga03-ssh-relay
+        --dir /run/claude-fpga04-ssh-relay
+        --ro-bind "$CLAUDE_FPGA04_RELAY_DIR" /run/claude-fpga04-ssh-relay
+    )
+fi
+
+# The new network namespace has no host interfaces or DNS route. General
+# network access stays behind the guarded loopback proxy. Optional lab mode
+# adds fixed SSH relays; these are trusted host execution paths, not IP-gated
+# internet access. Default deployments do not expose them.
+exec /usr/bin/bwrap \
+    --unshare-net \
+    --unshare-pid \
+    --unshare-ipc \
+    --die-with-parent \
+    --as-pid-1 \
+    --bind / / \
+    --ro-bind "$claude_passwd_file" /etc/passwd \
+    --tmpfs /run \
+    --dir /run/user \
+    --dir /run/user/__CCEN_UID__ \
+    --dir /run/claude-ip-gate \
+    --ro-bind "$CLAUDE_GATE_DIR" /run/claude-ip-gate \
+    "${fpga03_relay_args[@]}" \
+    --tmpfs /tmp \
+    --dev-bind /dev /dev \
+    "${host_runner_mask_args[@]}" \
+    --proc /proc \
+    --unsetenv DBUS_SESSION_BUS_ADDRESS \
+    --unsetenv DBUS_SYSTEM_BUS_ADDRESS \
+    --unsetenv DBUS_STARTER_ADDRESS \
+    --unsetenv DBUS_STARTER_BUS_TYPE \
+    --unsetenv all_proxy \
+    --unsetenv ALL_PROXY \
+    --setenv http_proxy "$CLAUDE_PROXY" \
+    --setenv https_proxy "$CLAUDE_PROXY" \
+    --setenv HTTP_PROXY "$CLAUDE_PROXY" \
+    --setenv HTTPS_PROXY "$CLAUDE_PROXY" \
+    --setenv no_proxy "$CLAUDE_NO_PROXY" \
+    --setenv NO_PROXY "$CLAUDE_NO_PROXY" \
+    --setenv TZ Asia/Singapore \
+    --setenv LOCPATH __CCEN_HOME__/.local/lib/locale \
+    --setenv LANG en_SG.UTF-8 \
+    --setenv LC_ALL en_SG.UTF-8 \
+    --setenv LANGUAGE en_SG:zh_SG \
+    --setenv XDG_RUNTIME_DIR /run/user/__CCEN_UID__ \
+    --chdir "$claude_cwd" \
+    -- \
+    /usr/bin/python3 "$CLAUDE_INNER" "${claude_argv[@]}"

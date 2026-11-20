@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+shopt -s nullglob
+
+extension_files=(
+    "$HOME"/.vscode-server/extensions/anthropic.claude-code-*/webview/index.js
+)
+backend_files=(
+    "$HOME"/.vscode-server/extensions/anthropic.claude-code-*/extension.js
+)
+
+if (( ${#extension_files[@]} == 0 || ${#backend_files[@]} == 0 )); then
+    echo "No installed Claude Code VS Code webview was found." >&2
+    exit 1
+fi
+
+hide_old='let C=p==="claudeai",[y,x]=ne("local")'
+hide_new='let C=!1,[y,x]=ne("local")'
+
+remote_old='async listRemoteSessions(){if(this.listSessionsPromise)'
+remote_new='async listRemoteSessions(){this.remoteSessions.value=[],this.remoteConnected.value=!1,this.remoteReconnecting.value=!1,this.remoteSessionsLoaded.value=!0;return;if(this.listSessionsPromise)'
+
+handler_old='async listRemoteSessions(){return{type:"list_remote_sessions_response",sessions:await this.teleportService.fetchRemoteSessions()}}'
+handler_new='async listRemoteSessions(){return{type:"list_remote_sessions_response",sessions:[]}}'
+
+for file in "${extension_files[@]}"; do
+    backup="${file}.local-only.orig"
+
+    if [[ "${1:-}" == "--restore" ]]; then
+        if [[ ! -f "$backup" ]]; then
+            echo "No backup exists for $file" >&2
+            exit 1
+        fi
+        cp -p -- "$backup" "$file"
+        echo "Restored Web sessions in $file"
+        continue
+    fi
+
+    hide_old_count="$(grep -Foc "$hide_old" "$file" || true)"
+    hide_new_count="$(grep -Foc "$hide_new" "$file" || true)"
+    remote_old_count="$(grep -Foc "$remote_old" "$file" || true)"
+    remote_new_count="$(grep -Foc "$remote_new" "$file" || true)"
+
+    if [[ "$hide_new_count" == "1" && "$remote_new_count" == "1" ]]; then
+        echo "Local-only mode is already active in $file"
+        continue
+    fi
+
+    if [[ "$hide_old_count" != "1" || "$remote_old_count" != "1" ||
+          "$hide_new_count" != "0" || "$remote_new_count" != "0" ]]; then
+        echo "Refusing to patch an unrecognized extension build: $file" >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$backup" ]]; then
+        cp -p -- "$file" "$backup"
+    fi
+
+    HIDE_OLD="$hide_old" HIDE_NEW="$hide_new" \
+    REMOTE_OLD="$remote_old" REMOTE_NEW="$remote_new" \
+        perl -0pi -e '
+            s/\Q$ENV{HIDE_OLD}\E/$ENV{HIDE_NEW}/g;
+            s/\Q$ENV{REMOTE_OLD}\E/$ENV{REMOTE_NEW}/g;
+        ' "$file"
+
+    if [[ "$(grep -Foc "$hide_new" "$file" || true)" != "1" ||
+          "$(grep -Foc "$remote_new" "$file" || true)" != "1" ]]; then
+        cp -p -- "$backup" "$file"
+        echo "Patch verification failed; original file restored." >&2
+        exit 1
+    fi
+
+    echo "Enabled Local-only mode in $file"
+done
+
+for file in "${backend_files[@]}"; do
+    backup="${file}.local-only.orig"
+
+    if [[ "${1:-}" == "--restore" ]]; then
+        if [[ ! -f "$backup" ]]; then
+            echo "No backup exists for $file" >&2
+            exit 1
+        fi
+        cp -p -- "$backup" "$file"
+        echo "Restored Web sessions in $file"
+        continue
+    fi
+
+    handler_old_count="$(grep -Foc "$handler_old" "$file" || true)"
+    handler_new_count="$(grep -Foc "$handler_new" "$file" || true)"
+
+    if [[ "$handler_new_count" == "1" ]]; then
+        echo "Remote-session backend is already disabled in $file"
+        continue
+    fi
+
+    if [[ "$handler_old_count" != "1" || "$handler_new_count" != "0" ]]; then
+        echo "Refusing to patch an unrecognized extension backend: $file" >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$backup" ]]; then
+        cp -p -- "$file" "$backup"
+    fi
+
+    HANDLER_OLD="$handler_old" HANDLER_NEW="$handler_new" \
+        perl -0pi -e 's/\Q$ENV{HANDLER_OLD}\E/$ENV{HANDLER_NEW}/g' "$file"
+
+    if [[ "$(grep -Foc "$handler_new" "$file" || true)" != "1" ]]; then
+        cp -p -- "$backup" "$file"
+        echo "Backend patch verification failed; original file restored." >&2
+        exit 1
+    fi
+
+    echo "Disabled remote-session backend in $file"
+done

@@ -1,0 +1,13 @@
+[Unit]
+Description=CCEN approved host job submission socket
+After=claude-ip-gate.service
+
+[Socket]
+ListenStream=%t/claude-ip-gate/host-runner.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+Accept=no
+
+[Install]
+WantedBy=sockets.target

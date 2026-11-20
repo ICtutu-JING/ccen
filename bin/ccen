@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ============================================================
+# CCEN - Claude Code Enable
+#
+# 作用：
+#   1. 检查当前终端环境
+#   2. 检查 SSH RemoteForward / Clash 代理
+#   3. 检查固定出口 IP
+#   4. 检查 Anthropic 是否能通过代理访问
+#   5. 显示最终运行环境
+#   6. 无显式参数时选择 Resume 历史会话或 New 全新会话
+#   7. 启动前清空终端
+#
+# Fail-Closed：
+#   任意关键检查失败，立即退出，不启动 Claude Code。
+# ============================================================
+
+PROXY="http://127.0.0.1:17898"
+EXPECTED_IP="__CCEN_EXPECTED_IP__"
+EXPECTED_CF_COUNTRY="__CCEN_COUNTRY__"
+EXPECTED_CF_COLO="__CCEN_ANTHROPIC_COLO__"
+REAL_CLAUDE="$HOME/.local/bin/claude"
+CLAUDE_GUARD="$HOME/.local/bin/claude-ip-guard"
+CLAUDE_SANDBOX="$HOME/.local/bin/claude-net-sandbox"
+
+NO_PROXY_VALUE="localhost,127.0.0.1,::1"
+
+if [[ "$EXPECTED_IP" == *'__CCEN_'* ]]; then
+    echo "[BLOCKED] Render this deployment with tools/render-linux.py before use." >&2
+    exit 1
+fi
+
+echo
+echo "============================================================"
+echo " CCEN - Claude Code 安全启动检查"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# 1. 检查真实 Claude Code CLI
+# ------------------------------------------------------------
+if [[ ! -f "$REAL_CLAUDE" || ! -x "$REAL_CLAUDE" ]]; then
+    echo "[FAIL] Claude Code CLI 不存在或不可执行"
+    echo "       $REAL_CLAUDE"
+    exit 1
+fi
+
+echo "[ OK ] Claude Code CLI"
+echo "       $REAL_CLAUDE"
+
+if [[ ! -x "$CLAUDE_GUARD" || ! -x "$CLAUDE_SANDBOX" ]]; then
+    echo "[FAIL] Claude Code 网络保护组件不存在或不可执行"
+    echo "       Guard   : $CLAUDE_GUARD"
+    echo "       Sandbox : $CLAUDE_SANDBOX"
+    exit 1
+fi
+
+echo "[ OK ] Claude Code 网络保护组件"
+
+# ------------------------------------------------------------
+# 2. 检查当前终端是否已经存在全局代理
+#
+# 设计目标：
+#   普通终端不走代理
+#   只有通过 CCEN 启动的 Claude Code 走代理
+# ------------------------------------------------------------
+if [[ -n "${HTTPS_PROXY:-}" ||
+      -n "${HTTP_PROXY:-}"  ||
+      -n "${ALL_PROXY:-}"   ||
+      -n "${https_proxy:-}" ||
+      -n "${http_proxy:-}"  ||
+      -n "${all_proxy:-}" ]]; then
+
+    echo
+    echo "[FAIL] 当前终端检测到全局代理环境变量"
+    echo "       为避免代理范围不明确，已拒绝启动"
+    echo
+    echo "代理值可能包含认证信息，因此不输出其内容。"
+    for proxy_name in HTTPS_PROXY HTTP_PROXY ALL_PROXY https_proxy http_proxy all_proxy; do
+        if [[ -n "${!proxy_name:-}" ]]; then
+            printf '  %s=<已设置>\n' "$proxy_name"
+        fi
+    done
+    exit 1
+fi
+
+echo "[ OK ] 当前终端无全局代理"
+
+# ------------------------------------------------------------
+# 3. 检查是否意外处于 Claude Code 子会话环境
+# ------------------------------------------------------------
+if [[ "${CLAUDE_CODE_CHILD_SESSION:-}" == "1" ]]; then
+    echo
+    echo "[FAIL] 检测到 CLAUDE_CODE_CHILD_SESSION=1"
+    echo "       当前终端可能位于 Claude Code 子会话环境中"
+    echo "       请回到普通 SSH / VS Code 终端后重新运行 ccen"
+    exit 1
+fi
+
+echo "[ OK ] 当前为普通终端环境"
+
+# ------------------------------------------------------------
+# 4. Claude Code 功能 / 隐私变量
+#
+# 你的实测结果：
+#
+#   DISABLE_TELEMETRY=1
+#       -> /remote-control 消失
+#
+#   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+#       -> /remote-control 消失
+#
+#   DISABLE_ERROR_REPORTING=1
+#       -> /remote-control 正常
+#
+#   DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
+#       -> /remote-control 正常
+#
+# 因此采用下面的最终配置。
+# ------------------------------------------------------------
+unset DISABLE_TELEMETRY
+unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+
+export DISABLE_ERROR_REPORTING=1
+export DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
+
+# ------------------------------------------------------------
+# 5. 立即刷新 IP 闸门，再检查固定出口 IP
+#
+# 注意：
+#   Guard 只允许专用住宅隧道 7899。
+#   CCEN 自己只通过受控闸门 17898 复核，不走 HPC 默认公网出口。
+# ------------------------------------------------------------
+if ! "$CLAUDE_GUARD" enforce; then
+    echo
+    echo "[FAIL] Claude Code IP 闸门未开放"
+    echo "       已拒绝启动 Claude Code"
+    exit 1
+fi
+
+CURRENT_IP="$(
+    curl \
+        --disable \
+        --silent \
+        --show-error \
+        --connect-timeout 5 \
+        --max-time 8 \
+        --proto '=https' \
+        --noproxy "" \
+        --proxy "$PROXY" \
+        https://api.ipify.org \
+        2>/dev/null || true
+)"
+
+if [[ -z "$CURRENT_IP" ]]; then
+    echo
+    echo "[FAIL] 无法通过 $PROXY 获取出口 IP"
+    echo
+    echo "请检查："
+    echo "  1. 本地 Clash 是否正在运行"
+    echo "  2. 专用住宅 SSH RemoteForward 7899 是否可用"
+    echo "  3. 可用代理是否仍为指定 IP 与 Cloudflare 区域"
+    exit 1
+fi
+
+echo "[ OK ] SSH 隧道 / 代理端口可用"
+
+if [[ "$CURRENT_IP" != "$EXPECTED_IP" ]]; then
+    echo
+    echo "[FAIL] 出口 IP 不符合要求"
+    echo "       已拒绝启动 Claude Code"
+    echo
+    echo "       期望 IP: $EXPECTED_IP"
+    echo "       当前 IP: $CURRENT_IP"
+    exit 1
+fi
+
+echo "[ OK ] 固定出口 IP"
+echo "       $CURRENT_IP"
+
+# ------------------------------------------------------------
+# 6. 检查 Cloudflare 看到的出口 IP
+# ------------------------------------------------------------
+CLOUDFLARE_TRACE="$(
+    curl \
+        --disable \
+        --silent \
+        --show-error \
+        --connect-timeout 5 \
+        --max-time 10 \
+        --proto '=https' \
+        --noproxy "" \
+        --proxy "$PROXY" \
+        https://www.cloudflare.com/cdn-cgi/trace \
+        2>/dev/null || true
+)"
+
+CLOUDFLARE_IP="$(printf '%s\n' "$CLOUDFLARE_TRACE" | sed -n 's/^ip=//p')"
+CLOUDFLARE_COUNTRY="$(printf '%s\n' "$CLOUDFLARE_TRACE" | sed -n 's/^loc=//p')"
+CLOUDFLARE_COLO="$(printf '%s\n' "$CLOUDFLARE_TRACE" | sed -n 's/^colo=//p')"
+
+if [[ -z "$CLOUDFLARE_IP" ]]; then
+    echo
+    echo "[FAIL] 无法取得 Cloudflare 出口检测结果"
+    echo "       已拒绝启动 Claude Code"
+    exit 1
+fi
+
+if [[ "$CLOUDFLARE_IP" != "$EXPECTED_IP" ]]; then
+    echo
+    echo "[FAIL] Cloudflare 看到的出口 IP 不符合要求"
+    echo "       已拒绝启动 Claude Code"
+    echo
+    echo "       期望 IP: $EXPECTED_IP"
+    echo "       当前 IP: $CLOUDFLARE_IP"
+    exit 1
+fi
+
+if [[ "$CLOUDFLARE_COUNTRY" != "$EXPECTED_CF_COUNTRY" ]]; then
+    echo
+    echo "[FAIL] Cloudflare 区域与固定出口不一致"
+    echo "       已拒绝启动 Claude Code"
+    echo
+    echo "       期望国家: $EXPECTED_CF_COUNTRY"
+    echo "       当前区域: ${CLOUDFLARE_COUNTRY:-unknown}/${CLOUDFLARE_COLO:-unknown}"
+    exit 1
+fi
+
+echo "[ OK ] Cloudflare 出口 IP 一致"
+echo "       $CLOUDFLARE_IP (${CLOUDFLARE_COUNTRY:-unknown}/${CLOUDFLARE_COLO:-unknown})"
+
+# ------------------------------------------------------------
+# 7. 检查 Anthropic 代理链路
+# ------------------------------------------------------------
+ANTHROPIC_STATUS="$(
+    curl \
+        --disable \
+        --silent \
+        --show-error \
+        --connect-timeout 5 \
+        --max-time 10 \
+        --proto '=https' \
+        --noproxy "" \
+        --proxy "$PROXY" \
+        --output /dev/null \
+        --write-out '%{http_code}' \
+        https://api.anthropic.com/ \
+        2>/dev/null || true
+)"
+
+if [[ -z "$ANTHROPIC_STATUS" || "$ANTHROPIC_STATUS" == "000" ]]; then
+    echo
+    echo "[FAIL] 无法通过代理访问 Anthropic"
+    echo "       已拒绝启动 Claude Code"
+    exit 1
+fi
+
+echo "[ OK ] Anthropic 代理链路可达"
+echo "       HTTP 状态码: $ANTHROPIC_STATUS"
+
+# ------------------------------------------------------------
+# 8. 设置只属于 Claude Code 进程的代理环境
+# ------------------------------------------------------------
+export HTTPS_PROXY="$PROXY"
+export HTTP_PROXY="$PROXY"
+export https_proxy="$PROXY"
+export http_proxy="$PROXY"
+
+unset ALL_PROXY
+unset all_proxy
+
+export NO_PROXY="$NO_PROXY_VALUE"
+export no_proxy="$NO_PROXY_VALUE"
+
+# Match the wrapper's deterministic locale; do not source an unrelated local
+# script that could alter the validated proxy or emit protocol output.
+export TZ="Asia/Singapore"
+export LOCPATH="$HOME/.local/lib/locale"
+export LANG="en_SG.UTF-8"
+export LC_ALL="en_SG.UTF-8"
+export LANGUAGE="en_SG:zh_SG"
+
+# ------------------------------------------------------------
+# 9. 显示最终运行环境
+# ------------------------------------------------------------
+echo
+echo "============================================================"
+echo " 所有安全检查通过"
+echo "============================================================"
+echo
+echo "  Claude CLI : $REAL_CLAUDE"
+echo "  Proxy      : $PROXY"
+echo "  Exit IP    : $CURRENT_IP"
+echo "  Cloudflare : $CLOUDFLARE_IP (${CLOUDFLARE_COUNTRY:-unknown}/${CLOUDFLARE_COLO:-unknown})"
+echo "  DNS path   : proxy-side; NO_PROXY=loopback only"
+echo "  Kill switch: launch check; 45s health interval; 3 transient failures trip"
+echo "  Edge pin   : Anthropic CF-Ray $EXPECTED_CF_COLO (checked by IP guard)"
+echo "  Timezone   : $TZ"
+echo "  Locale     : $LANG"
+echo "  Languages  : $LANGUAGE"
+echo
+echo "  Remote Control:"
+echo "    DISABLE_TELEMETRY                         = unset"
+echo "    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC  = unset"
+echo
+echo "  Privacy:"
+echo "    DISABLE_ERROR_REPORTING                   = 1"
+echo "    DISABLE_NON_ESSENTIAL_MODEL_CALLS         = 1"
+echo
+echo "============================================================"
+echo
+
+# ------------------------------------------------------------
+# 10. 选择会话模式
+#
+# 不带参数运行 ccen 时：
+#   Resume -> 调用 Claude 原生历史对话选择器
+#   New    -> 启动完全全新的对话
+#
+# 显式传入 Claude 参数时保持原有透传行为，例如：
+#   ccen --resume
+#   ccen --continue
+#   ccen --resume <session-id>
+# ------------------------------------------------------------
+CLAUDE_ARGS=("$@")
+
+if (( ${#CLAUDE_ARGS[@]} == 0 )); then
+    echo "选择 Claude Code 会话模式："
+    echo
+    echo "  [1] Resume  从历史对话列表中选择并继续"
+    echo "  [2] New     开始一个完全全新的对话"
+    echo "  [q] Cancel  取消启动"
+    echo
+    read -r -p "请选择 [1/2/q]: " SESSION_CHOICE
+
+    case "$SESSION_CHOICE" in
+        1|r|R|resume|Resume|RESUME)
+            CLAUDE_ARGS=(--resume)
+            ;;
+        2|n|N|new|New|NEW)
+            CLAUDE_ARGS=()
+            ;;
+        q|Q|quit|Quit|QUIT|"")
+            echo
+            echo "已取消启动 Claude Code。"
+            exit 0
+            ;;
+        *)
+            echo
+            echo "[FAIL] 无效选择，已取消启动 Claude Code。"
+            exit 1
+            ;;
+    esac
+else
+    read -r -p "已提供 Claude 启动参数，确认启动？[y/N] " ANSWER
+    case "$ANSWER" in
+        y|Y|yes|YES) ;;
+        *)
+            echo
+            echo "已取消启动 Claude Code。"
+            exit 0
+            ;;
+    esac
+fi
+
+# 清空当前显示内容和支持该功能的终端回滚记录
+printf '\033[3J\033[H\033[2J'
+
+exec "$CLAUDE_SANDBOX" "$REAL_CLAUDE" "${CLAUDE_ARGS[@]}"

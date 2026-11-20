@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "profiles": {
+    "cancel-probe": {
+      "description": "Harmless long-running process-tree cancellation probe",
+      "command": [
+        "/usr/bin/python3",
+        "-c",
+        "import subprocess,sys,time; print('cancel_probe_start',flush=True); child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(300)']); print('child_pid='+str(child.pid),flush=True); time.sleep(300)"
+      ],
+      "working_directory": "__CCEN_HOME__",
+      "timeout_seconds": 360,
+      "environment": {},
+      "integrity": {},
+      "network": "offline"
+    },
+    "failure-probe": {
+      "description": "Harmless exact exit-code probe",
+      "command": [
+        "/usr/bin/python3",
+        "-c",
+        "import sys; print('intentional_exit_42',flush=True); sys.exit(42)"
+      ],
+      "working_directory": "__CCEN_HOME__",
+      "timeout_seconds": 120,
+      "environment": {},
+      "integrity": {},
+      "network": "offline"
+    },
+    "persistence-probe": {
+      "description": "Harmless 30-second host persistence and offline-network probe",
+      "command": [
+        "/usr/bin/python3",
+        "-c",
+        "import os,socket,time; print('probe_start', flush=True); print('pid='+str(os.getpid()), flush=True); print('run_udev='+str(os.path.isdir('/run/udev')), flush=True); print('interfaces='+','.join(name for _index,name in socket.if_nameindex()), flush=True); exec(\"try:\\n socket.socket(socket.AF_INET,socket.SOCK_STREAM); print('inet_socket=unexpected-success',flush=True)\\nexcept OSError as error:\\n print('inet_socket=blocked errno='+str(error.errno),flush=True)\"); time.sleep(30); print('probe_finished', flush=True)"
+      ],
+      "working_directory": "__CCEN_HOME__",
+      "timeout_seconds": 120,
+      "environment": {},
+      "integrity": {},
+      "network": "offline"
+    }
+  }
+}

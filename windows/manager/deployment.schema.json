@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CCEN Windows deployment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ssh_alias", "expected_ip", "expected_country", "expected_colo", "remote_path"],
+  "properties": {
+    "ssh_alias": {"type": "string", "minLength": 1},
+    "expected_ip": {"type": "string", "format": "ipv4"},
+    "expected_country": {"type": "string", "pattern": "^[A-Z]{2}$"},
+    "expected_colo": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "remote_path": {"type": "string", "pattern": "^/"}
+  }
+}

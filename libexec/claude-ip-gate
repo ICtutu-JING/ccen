@@ -1,0 +1,877 @@
+#!/usr/bin/env python3
+"""Fail-closed local proxy gate for Claude Code.
+
+The daemon exposes a TCP and a Unix-domain proxy socket, but only while the
+configured upstream proxy is independently verified.  It never resolves
+internet hostnames itself: every probe is made by curl through the literal
+loopback HTTP proxy address.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import dataclasses
+import datetime as dt
+import fcntl
+import os
+import pathlib
+import re
+import signal
+import socket
+import sys
+import tempfile
+from typing import Any
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python 3.9+ is required in practice.
+    ZoneInfo = None  # type: ignore[assignment]
+
+
+EXPECTED_IP = os.environ.get("CLAUDE_GUARD_EXPECTED_IP", "__CCEN_EXPECTED_IP__")
+EXPECTED_COUNTRY = os.environ.get("CLAUDE_GUARD_EXPECTED_CF_COUNTRY", "__CCEN_COUNTRY__")
+EXPECTED_COLO = os.environ.get("CLAUDE_GUARD_EXPECTED_CF_COLO", "__CCEN_ANTHROPIC_COLO__")
+
+UPSTREAM_HOST = "127.0.0.1"
+# Only the dedicated residential reverse tunnel may carry Claude traffic.
+# 7898 is rule-based, so shared Cloudflare domains use the ordinary proxy.
+# Verify fixed IP, Cloudflare country, and the configured Anthropic POP before opening the gate.
+UPSTREAM_PORTS = (7899,)
+TCP_HOST = "127.0.0.1"
+TCP_PORT = 17898
+
+HOME = pathlib.Path(os.environ.get("HOME", "__CCEN_HOME__"))
+RUNTIME_ROOT = pathlib.Path(
+    os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+)
+RUNTIME_DIR = RUNTIME_ROOT / "claude-ip-gate"
+UDS_PATH = RUNTIME_DIR / "proxy.sock"
+STATE_FILE = RUNTIME_DIR / "status"
+LOCK_PATH = RUNTIME_DIR / "daemon.lock"
+HOSTNAME = socket.gethostname()
+try:
+    BOOT_ID = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(
+        encoding="ascii"
+    ).strip()
+except (OSError, UnicodeError):
+    BOOT_ID = "unknown"
+
+CURL = "/usr/bin/curl"
+CURL_TIMEOUT_SECONDS = 10
+# Start a new verification every 45 seconds. Identity mismatches trip after
+# the completed probe; transient failures use the retry policy below. This is
+# periodic sampling, not an instantaneous or hard real-time IP lock.
+HEALTHY_INTERVAL_SECONDS = 45
+BLOCKED_INTERVAL_SECONDS = 10
+# A single health-check timeout must not tear down a multi-hour Claude stream.
+# The first two transient failures preserve listeners, existing streams, and
+# acceptance of new connections. Three consecutive transient failures close
+# the gate; any verified identity/location mismatch closes it after the probe.
+TRANSIENT_FAILURE_THRESHOLD = 3
+
+if any("__CCEN_" in value for value in (EXPECTED_IP, EXPECTED_COUNTRY, EXPECTED_COLO)):
+    raise SystemExit("[blocked] render this deployment with tools/render-linux.py before use")
+
+
+@dataclasses.dataclass(slots=True)
+class Probe:
+    ok: bool
+    value: str = ""
+    reason: str = ""
+    details: dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(slots=True)
+class CheckResult:
+    ok: bool
+    reason: str
+    upstream_port: int = 0
+    ipify_ip: str = ""
+    cloudflare_ip: str = ""
+    cloudflare_country: str = ""
+    cloudflare_colo: str = ""
+    anthropic_http_status: str = ""
+    anthropic_cf_ray: str = ""
+    anthropic_colo: str = ""
+
+
+def singapore_timestamp() -> str:
+    if ZoneInfo is not None:
+        zone = ZoneInfo("Asia/Singapore")
+        return dt.datetime.now(zone).strftime("%Y-%m-%dT%H:%M:%S%z")
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def state_safe(value: Any) -> str:
+    return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+
+def prepare_runtime_dir() -> None:
+    RUNTIME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(RUNTIME_DIR, 0o700)
+
+
+def acquire_instance_lock() -> int | None:
+    """Hold a host-local lock before touching the listener socket or state."""
+
+    prepare_runtime_dir()
+    descriptor = os.open(
+        LOCK_PATH,
+        os.O_CREAT | os.O_RDWR | os.O_CLOEXEC,
+        0o600,
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        return None
+
+    os.ftruncate(descriptor, 0)
+    os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
+    os.fsync(descriptor)
+    return descriptor
+
+
+def write_state(
+    status: str,
+    result: CheckResult | None,
+    *,
+    reason: str,
+    tcp_listener: str,
+    uds_listener: str,
+    daemon_pid: int,
+    next_check_seconds: int,
+) -> None:
+    """Atomically replace this host's runtime state file."""
+
+    prepare_runtime_dir()
+    checked_epoch = int(dt.datetime.now().timestamp())
+    values: dict[str, Any] = {
+        "status": status,
+        "hostname": HOSTNAME,
+        "boot_id": BOOT_ID,
+        "checked_at": singapore_timestamp(),
+        "checked_epoch": checked_epoch,
+        "reason": reason,
+        "expected_ip": EXPECTED_IP,
+        "expected_cloudflare_country": EXPECTED_COUNTRY,
+        "expected_anthropic_colo": EXPECTED_COLO,
+        "ipify_ip": result.ipify_ip if result else "",
+        "cloudflare_ip": result.cloudflare_ip if result else "",
+        "cloudflare_country": result.cloudflare_country if result else "",
+        "cloudflare_colo": result.cloudflare_colo if result else "",
+        "anthropic_http_status": (
+            result.anthropic_http_status if result else ""
+        ),
+        "anthropic_cf_ray": result.anthropic_cf_ray if result else "",
+        "anthropic_colo": result.anthropic_colo if result else "",
+        "upstream_proxy": (
+            f"http://{UPSTREAM_HOST}:{result.upstream_port}"
+            if result and result.upstream_port
+            else "none"
+        ),
+        "upstream_candidates": ",".join(str(port) for port in UPSTREAM_PORTS),
+        "gate_tcp_proxy": f"http://{TCP_HOST}:{TCP_PORT}",
+        "gate_uds": str(UDS_PATH),
+        "tcp_listener": tcp_listener,
+        "uds_listener": uds_listener,
+        "daemon_pid": daemon_pid,
+        "next_check_seconds": next_check_seconds,
+    }
+
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".status.", dir=str(RUNTIME_DIR), text=True
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            for key, value in values.items():
+                stream.write(f"{key}={state_safe(value)}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, STATE_FILE)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary_name)
+        raise
+
+
+async def run_curl(
+    upstream_port: int, extra_arguments: list[str]
+) -> tuple[int, str, str]:
+    """Run curl with an explicit proxy and no implicit bypass or curlrc."""
+
+    command = [
+        CURL,
+        "--disable",
+        "--silent",
+        "--show-error",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        str(CURL_TIMEOUT_SECONDS),
+        "--noproxy",
+        "",
+        "--proxy",
+        f"http://{UPSTREAM_HOST}:{upstream_port}",
+        "--proto",
+        "=https",
+        *extra_arguments,
+    ]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "NO_PROXY": "",
+            "no_proxy": "",
+            "TZ": "Asia/Singapore",
+            "LANG": "en_SG.UTF-8",
+            "LC_ALL": "en_SG.UTF-8",
+        }
+    )
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            process.communicate(), timeout=CURL_TIMEOUT_SECONDS + 3
+        )
+    except asyncio.CancelledError:
+        if process is not None and process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(process.wait())
+        raise
+    except (FileNotFoundError, PermissionError) as error:
+        return 127, "", str(error)
+    except asyncio.TimeoutError:
+        if process is not None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(Exception):
+                await process.wait()
+        return 124, "", "curl subprocess timeout"
+
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    return process.returncode or 0, stdout, stderr
+
+
+async def probe_ipify(upstream_port: int) -> Probe:
+    return_code, output, error = await run_curl(
+        upstream_port,
+        ["--fail", "https://api.ipify.org"]
+    )
+    address = output.strip()
+    if return_code != 0:
+        return Probe(False, address, f"ipify curl rc={return_code}: {error}")
+    if address != EXPECTED_IP:
+        return Probe(
+            False,
+            address,
+            f"ipify mismatch: got {address or 'empty'}, expected {EXPECTED_IP}",
+        )
+    return Probe(True, address)
+
+
+async def probe_cloudflare(upstream_port: int) -> Probe:
+    return_code, output, error = await run_curl(
+        upstream_port,
+        ["--fail", "https://www.cloudflare.com/cdn-cgi/trace"]
+    )
+    trace: dict[str, str] = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            trace[key.strip()] = value.strip()
+
+    address = trace.get("ip", "")
+    country = trace.get("loc", "")
+    colo = trace.get("colo", "")
+    details = {"ip": address, "country": country, "colo": colo}
+    if return_code != 0:
+        return Probe(
+            False,
+            reason=f"Cloudflare curl rc={return_code}: {error}",
+            details=details,
+        )
+    if address != EXPECTED_IP:
+        return Probe(
+            False,
+            reason=(
+                "Cloudflare IP mismatch: "
+                f"got {address or 'empty'}, expected {EXPECTED_IP}"
+            ),
+            details=details,
+        )
+    if country != EXPECTED_COUNTRY:
+        return Probe(
+            False,
+            reason=(
+                "Cloudflare country mismatch: "
+                f"got {country or 'empty'}, expected {EXPECTED_COUNTRY}"
+            ),
+            details=details,
+        )
+    return Probe(True, details=details)
+
+
+async def probe_anthropic(upstream_port: int) -> Probe:
+    marker = "__CLAUDE_GUARD_HTTP_STATUS__:"
+    return_code, output, error = await run_curl(
+        upstream_port,
+        [
+            "--dump-header",
+            "-",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            f"\\n{marker}%{{http_code}}\\n",
+            "https://api.anthropic.com/",
+        ]
+    )
+    http_status = ""
+    cf_ray = ""
+    for line in output.splitlines():
+        stripped = line.strip().rstrip("\r")
+        if stripped.startswith(marker):
+            http_status = stripped[len(marker) :]
+        elif stripped.lower().startswith("cf-ray:"):
+            cf_ray = stripped.split(":", 1)[1].strip()
+
+    match = re.search(r"-([A-Za-z0-9]+)$", cf_ray)
+    colo = match.group(1).upper() if match else ""
+    details = {"http_status": http_status, "cf_ray": cf_ray, "colo": colo}
+    if return_code != 0:
+        return Probe(
+            False,
+            reason=f"Anthropic curl rc={return_code}: {error}",
+            details=details,
+        )
+    if not http_status or http_status == "000" or not cf_ray:
+        return Probe(
+            False,
+            reason="Anthropic edge is unreachable or has no CF-Ray",
+            details=details,
+        )
+    if colo != EXPECTED_COLO:
+        return Probe(
+            False,
+            reason=(
+                "Anthropic Cloudflare edge mismatch: "
+                f"got {colo or 'empty'}, expected {EXPECTED_COLO}"
+            ),
+            details=details,
+        )
+    return Probe(True, details=details)
+
+
+async def perform_checks(upstream_port: int) -> CheckResult:
+    """Run all three independent checks concurrently for one proxy port."""
+
+    ipify, cloudflare, anthropic = await asyncio.gather(
+        probe_ipify(upstream_port),
+        probe_cloudflare(upstream_port),
+        probe_anthropic(upstream_port),
+    )
+    failures = [
+        probe.reason
+        for probe in (ipify, cloudflare, anthropic)
+        if not probe.ok
+    ]
+    return CheckResult(
+        ok=not failures,
+        reason="all checks passed" if not failures else "; ".join(failures),
+        upstream_port=upstream_port,
+        ipify_ip=ipify.value,
+        cloudflare_ip=cloudflare.details.get("ip", ""),
+        cloudflare_country=cloudflare.details.get("country", ""),
+        cloudflare_colo=cloudflare.details.get("colo", ""),
+        anthropic_http_status=anthropic.details.get("http_status", ""),
+        anthropic_cf_ray=anthropic.details.get("cf_ray", ""),
+        anthropic_colo=anthropic.details.get("colo", ""),
+    )
+
+
+async def select_healthy_upstream(
+    preferred_port: int | None = None,
+) -> CheckResult:
+    """Select an independently verified upstream, retaining a healthy choice."""
+
+    ordered_ports = list(UPSTREAM_PORTS)
+    if preferred_port in ordered_ports:
+        ordered_ports.remove(preferred_port)
+        ordered_ports.insert(0, preferred_port)
+
+    first_failure: CheckResult | None = None
+    failure_reasons: list[str] = []
+    for upstream_port in ordered_ports:
+        result = await perform_checks(upstream_port)
+        if result.ok:
+            return result
+        if first_failure is None:
+            first_failure = result
+        failure_reasons.append(f"{upstream_port}: {result.reason}")
+
+    assert first_failure is not None
+    return dataclasses.replace(
+        first_failure,
+        reason=" | ".join(failure_reasons),
+        upstream_port=0,
+    )
+
+
+async def close_writer(writer: asyncio.StreamWriter | None) -> None:
+    if writer is None:
+        return
+    writer.close()
+    with contextlib.suppress(
+        ConnectionError, BrokenPipeError, asyncio.TimeoutError
+    ):
+        await asyncio.wait_for(writer.wait_closed(), timeout=1)
+
+
+class ProxyGate:
+    def __init__(self) -> None:
+        self.tcp_server: asyncio.AbstractServer | None = None
+        self.uds_server: asyncio.AbstractServer | None = None
+        self.allowed = False
+        self.stop_event = asyncio.Event()
+        self.recheck_event = asyncio.Event()
+        self.check_task: asyncio.Task[CheckResult] | None = None
+        self.handler_tasks: set[asyncio.Task[Any]] = set()
+        self.connection_writers: dict[
+            asyncio.Task[Any],
+            tuple[asyncio.StreamWriter | None, asyncio.StreamWriter | None],
+        ] = {}
+        self.last_result: CheckResult | None = None
+        self.last_good_result: CheckResult | None = None
+        self.active_upstream_port: int | None = None
+        self.consecutive_transient_failures = 0
+        self.generation = 0
+
+    def request_stop(self) -> None:
+        self.stop_event.set()
+        self.recheck_event.set()
+        if self.check_task is not None and not self.check_task.done():
+            self.check_task.cancel()
+
+    def request_recheck(self) -> None:
+        self.recheck_event.set()
+
+    async def _pipe(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> tuple[int, bool]:
+        transferred = 0
+        try:
+            while self.allowed:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    break
+                writer.write(chunk)
+                await writer.drain()
+                transferred += len(chunk)
+        except asyncio.CancelledError:
+            raise
+        except (
+            ConnectionError,
+            BrokenPipeError,
+            OSError,
+        ):
+            return transferred, True
+        return transferred, False
+
+    async def _handle_client(
+        self,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+        route_generation: int,
+        upstream_port: int,
+    ) -> None:
+        task = asyncio.current_task()
+        if task is None:
+            await close_writer(client_writer)
+            return
+
+        upstream_writer: asyncio.StreamWriter | None = None
+        relay_tasks: set[asyncio.Task[tuple[int, bool]]] = set()
+        self.handler_tasks.add(task)
+        self.connection_writers[task] = (client_writer, None)
+        try:
+            if (
+                not self.allowed
+                or route_generation != self.generation
+                or upstream_port != self.active_upstream_port
+            ):
+                return
+            try:
+                upstream_reader, upstream_writer = await asyncio.open_connection(
+                    UPSTREAM_HOST, upstream_port
+                )
+            except (ConnectionError, OSError):
+                self.request_recheck()
+                return
+            self.connection_writers[task] = (client_writer, upstream_writer)
+            if (
+                not self.allowed
+                or route_generation != self.generation
+                or upstream_port != self.active_upstream_port
+            ):
+                return
+            upload_task = asyncio.create_task(
+                self._pipe(client_reader, upstream_writer)
+            )
+            download_task = asyncio.create_task(
+                self._pipe(upstream_reader, client_writer)
+            )
+            relay_tasks = {upload_task, download_task}
+            done, pending = await asyncio.wait(
+                relay_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            if download_task in done and self.allowed:
+                transferred, had_error = download_task.result()
+                if transferred == 0 or had_error:
+                    self.request_recheck()
+        finally:
+            for relay_task in relay_tasks:
+                if not relay_task.done():
+                    relay_task.cancel()
+            if relay_tasks:
+                await asyncio.gather(*relay_tasks, return_exceptions=True)
+            self.connection_writers.pop(task, None)
+            self.handler_tasks.discard(task)
+            await asyncio.gather(
+                close_writer(client_writer),
+                close_writer(upstream_writer),
+                return_exceptions=True,
+            )
+
+    def listeners_active(self) -> bool:
+        return bool(
+            self.tcp_server
+            and self.tcp_server.is_serving()
+            and self.uds_server
+            and self.uds_server.is_serving()
+            and UDS_PATH.is_socket()
+        )
+
+    async def open_listeners(self) -> None:
+        if self.listeners_active():
+            self.allowed = True
+            return
+
+        await self.close_gate()
+        prepare_runtime_dir()
+        with contextlib.suppress(FileNotFoundError):
+            UDS_PATH.unlink()
+
+        if self.active_upstream_port is None:
+            raise RuntimeError("no verified upstream selected")
+
+        def handle_client(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> asyncio.Future[Any] | asyncio.Task[Any] | Any:
+            # Resolve the route at accept time.  A newly verified fallback can
+            # serve new requests without killing streams already using the old
+            # (also previously verified) route.
+            upstream_port = self.active_upstream_port
+            if upstream_port is None:
+                writer.close()
+                return None
+            return self._handle_client(
+                reader,
+                writer,
+                self.generation,
+                upstream_port,
+            )
+
+        tcp_server: asyncio.AbstractServer | None = None
+        uds_server: asyncio.AbstractServer | None = None
+        try:
+            tcp_server = await asyncio.start_server(
+                handle_client,
+                TCP_HOST,
+                TCP_PORT,
+                family=socket.AF_INET,
+                reuse_address=True,
+            )
+            uds_server = await asyncio.start_unix_server(
+                handle_client, path=str(UDS_PATH)
+            )
+            os.chmod(UDS_PATH, 0o600)
+        except BaseException:
+            for server in (tcp_server, uds_server):
+                if server is not None:
+                    server.close()
+                    await server.wait_closed()
+            with contextlib.suppress(FileNotFoundError):
+                UDS_PATH.unlink()
+            raise
+
+        self.tcp_server = tcp_server
+        self.uds_server = uds_server
+        self.allowed = True
+
+    async def close_gate(self) -> None:
+        """Close both listeners and tear down every active forwarded stream."""
+
+        self.allowed = False
+        self.generation += 1
+        servers = [self.tcp_server, self.uds_server]
+        self.tcp_server = None
+        self.uds_server = None
+        for server in servers:
+            if server is not None:
+                server.close()
+        for server in servers:
+            if server is not None:
+                with contextlib.suppress(Exception):
+                    await server.wait_closed()
+
+        writers = list(self.connection_writers.values())
+        for client_writer, upstream_writer in writers:
+            for writer in (client_writer, upstream_writer):
+                if writer is None:
+                    continue
+                raw_socket = writer.get_extra_info("socket")
+                if raw_socket is not None:
+                    with contextlib.suppress(OSError):
+                        raw_socket.shutdown(socket.SHUT_RDWR)
+                writer.close()
+
+        tasks = [
+            task
+            for task in self.handler_tasks
+            if task is not asyncio.current_task() and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        with contextlib.suppress(FileNotFoundError):
+            UDS_PATH.unlink()
+
+    async def wait_for_trigger(self, delay: int) -> None:
+        stop_waiter = asyncio.create_task(self.stop_event.wait())
+        recheck_waiter = asyncio.create_task(self.recheck_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {stop_waiter, recheck_waiter},
+                timeout=delay,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            del done
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            for task in (stop_waiter, recheck_waiter):
+                if not task.done():
+                    task.cancel()
+
+    async def run(self) -> None:
+        write_state(
+            "checking",
+            None,
+            reason="daemon starting; listeners remain closed until verified",
+            tcp_listener="inactive",
+            uds_listener="inactive",
+            daemon_pid=os.getpid(),
+            next_check_seconds=0,
+        )
+        while not self.stop_event.is_set():
+            self.recheck_event.clear()
+            check_started = asyncio.get_running_loop().time()
+            self.check_task = asyncio.create_task(
+                select_healthy_upstream(self.active_upstream_port)
+            )
+            try:
+                result = await self.check_task
+            except asyncio.CancelledError:
+                if self.stop_event.is_set():
+                    break
+                raise
+            finally:
+                self.check_task = None
+            self.last_result = result
+            if self.stop_event.is_set():
+                break
+
+            if result.ok:
+                self.consecutive_transient_failures = 0
+                self.last_good_result = result
+                if self.active_upstream_port != result.upstream_port:
+                    # Do not call close_gate() here. It deliberately terminates
+                    # every active stream, which used to turn a harmless
+                    # 7898/7899 health-check failover into Claude Code's
+                    # "Connection closed mid-response" error.
+                    self.active_upstream_port = result.upstream_port
+                try:
+                    await self.open_listeners()
+                except Exception as error:
+                    await self.close_gate()
+                    result = dataclasses.replace(
+                        result,
+                        ok=False,
+                        reason=f"failed to open guarded listeners: {error}",
+                    )
+
+            if result.ok and self.listeners_active():
+                interval = HEALTHY_INTERVAL_SECONDS
+                elapsed = asyncio.get_running_loop().time() - check_started
+                wait_seconds = max(0, round(interval - elapsed))
+                write_state(
+                    "allowed",
+                    result,
+                    reason=result.reason,
+                    tcp_listener="active",
+                    uds_listener="active",
+                    daemon_pid=os.getpid(),
+                    next_check_seconds=wait_seconds,
+                )
+                print(
+                    "[allowed] "
+                    f"{result.ipify_ip} "
+                    f"{result.cloudflare_country}/{result.cloudflare_colo} "
+                    f"Anthropic/{result.anthropic_colo} "
+                    f"via {result.upstream_port}",
+                    flush=True,
+                )
+            else:
+                identity_mismatch = "mismatch" in result.reason.lower()
+                self.consecutive_transient_failures += 1
+                preserve_listeners = (
+                    not identity_mismatch
+                    and self.listeners_active()
+                    and self.active_upstream_port is not None
+                    and self.last_good_result is not None
+                    and self.consecutive_transient_failures
+                    < TRANSIENT_FAILURE_THRESHOLD
+                )
+                interval = BLOCKED_INTERVAL_SECONDS
+                elapsed = asyncio.get_running_loop().time() - check_started
+                wait_seconds = max(0, round(interval - elapsed))
+                if preserve_listeners:
+                    write_state(
+                        "allowed",
+                        self.last_good_result,
+                        reason=(
+                            "transient health-check failure "
+                            f"{self.consecutive_transient_failures}/"
+                            f"{TRANSIENT_FAILURE_THRESHOLD}; "
+                            "listeners and existing streams preserved; new connections accepted; "
+                            f"{result.reason}"
+                        ),
+                        tcp_listener="active",
+                        uds_listener="active",
+                        daemon_pid=os.getpid(),
+                        next_check_seconds=wait_seconds,
+                    )
+                    print(
+                        "[degraded] "
+                        f"{self.consecutive_transient_failures}/"
+                        f"{TRANSIENT_FAILURE_THRESHOLD}; "
+                        f"preserving listeners and active streams; new connections accepted: {result.reason}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                else:
+                    await self.close_gate()
+                    write_state(
+                        "blocked",
+                        result,
+                        reason=result.reason,
+                        tcp_listener="inactive",
+                        uds_listener="inactive",
+                        daemon_pid=os.getpid(),
+                        next_check_seconds=wait_seconds,
+                    )
+                    print(
+                        f"[blocked] {result.reason}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+            await self.wait_for_trigger(wait_seconds)
+
+        await self.close_gate()
+        write_state(
+            "stopped",
+            self.last_result,
+            reason="daemon stopped; gate closed",
+            tcp_listener="inactive",
+            uds_listener="inactive",
+            daemon_pid=os.getpid(),
+            next_check_seconds=0,
+        )
+
+
+async def single_check() -> int:
+    result = await select_healthy_upstream()
+    if result.ok:
+        print(
+            "[OK] "
+            f"{result.ipify_ip} "
+            f"({result.cloudflare_country}/{result.cloudflare_colo}, "
+            f"Anthropic {result.anthropic_colo}, "
+            f"upstream {result.upstream_port})"
+        )
+        return 0
+    print(f"[BLOCKED] {result.reason}", file=sys.stderr)
+    return 1
+
+
+async def daemon_main() -> int:
+    lock_descriptor = acquire_instance_lock()
+    if lock_descriptor is None:
+        print(
+            f"[blocked] another Claude IP gate owns {LOCK_PATH}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
+    gate = ProxyGate()
+    loop = asyncio.get_running_loop()
+    for handled_signal in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(handled_signal, gate.request_stop)
+    loop.add_signal_handler(signal.SIGHUP, gate.request_recheck)
+
+    try:
+        await gate.run()
+    finally:
+        await gate.close_gate()
+        os.close(lock_descriptor)
+    return 0
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fail-closed Claude Code proxy gate"
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="run all upstream checks once without opening the gate",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    if arguments.check:
+        return asyncio.run(single_check())
+    return asyncio.run(daemon_main())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

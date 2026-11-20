@@ -1,0 +1,19 @@
+[Unit]
+Description=CCEN approved host job broker
+Requires=ccen-host-runner.socket
+After=ccen-host-runner.socket
+ConditionPathExists=%h/.config/ccen/host-runner.json
+ConditionFileIsExecutable=%h/.local/libexec/ccen-host-runner
+
+[Service]
+Type=exec
+ExecStart=%h/.local/libexec/ccen-host-runner
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/ccen/host-jobs
+RestrictAddressFamilies=AF_UNIX

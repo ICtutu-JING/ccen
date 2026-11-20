@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+# claude-ssh-lab <fpga01|fpga02|fpga05|fpga06> [cmd...]
+# 容器 -> fpga04 宿主 sshd（复用 claude-ssh-fpga04 的固定 relay）-> 目标:22（ssh -W 跳转）。
+# 不新增宿主服务、不改容器挂载：fpga04 relay 在则本通道在。每台一个 ControlMaster，N 条命令只占 1 个 sshd 连接。
+# 2026-10-15 建（用户要求像连 fpga03 一样建立到 fpga01/02/05/06 的长期稳定连接）。
+# fpga03 / fpga04 仍用各自原有的 helper（fixed relay），不走这里。
+
+readonly JUMP_HELPER="__CCEN_HOME__/.local/bin/claude-ssh-fpga04"
+readonly IDENTITY_FILE="__CCEN_SSH_IDENTITY__"
+readonly KNOWN_HOSTS_FILE="__CCEN_SSH_KNOWN_HOSTS__"
+
+[[ $# -ge 1 ]] || { printf 'usage: claude-ssh-lab <fpga01|fpga02|fpga05|fpga06> [cmd...]\n' >&2; exit 2; }
+HOST=$1; shift
+case "$HOST" in
+    fpga01) IP=__CCEN_FPGA01_IP__ ;;
+    fpga02) IP=__CCEN_FPGA02_IP__ ;;
+    fpga05) IP=__CCEN_FPGA05_IP__ ;;
+    fpga06) IP=__CCEN_FPGA06_IP__ ;;
+    *) printf 'claude-ssh-lab: unknown host %s\n' "$HOST" >&2; exit 2 ;;
+esac
+
+[[ "$(id -u)" == "__CCEN_UID__" ]] || {
+    printf 'claude-ssh-lab: unexpected local uid\n' >&2; exit 1; }
+[[ -x "$JUMP_HELPER" ]] || {
+    printf 'claude-ssh-lab: jump helper claude-ssh-fpga04 is unavailable\n' >&2; exit 1; }
+[[ -r "$IDENTITY_FILE" && -r "$KNOWN_HOSTS_FILE" ]] || {
+    printf 'claude-ssh-lab: SSH identity or known-hosts file is unavailable\n' >&2; exit 1; }
+
+# 优先走与 fpga03 同构的固定 relay（claude-lab-ssh-relay@<host>，socket 在已挂进容器的 fpga04 relay 目录里；
+# 安装方式见 docs/linux.md 的可选实验室 relay；没装单独 relay 就借道本机 sshd 跳转。
+RELAY_SOCKET="/run/claude-fpga04-ssh-relay/$HOST.sock"
+if [[ -S "$RELAY_SOCKET" ]]; then PROXY="/usr/bin/nc -U $RELAY_SOCKET"; else PROXY="$JUMP_HELPER -W $IP:22"; fi
+
+exec /usr/bin/ssh \
+    -F /dev/null \
+    -o BatchMode=yes \
+    -o ConnectTimeout=15 \
+    -o "HostName=$IP" \
+    -o 'User=__CCEN_SSH_USER__' \
+    -o "IdentityFile=$IDENTITY_FILE" \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=yes \
+    -o "UserKnownHostsFile=$KNOWN_HOSTS_FILE" \
+    -o "HostKeyAlias=$HOST" \
+    -o "ProxyCommand=$PROXY" \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=4 \
+    -o ForwardAgent=no \
+    -o ClearAllForwardings=yes \
+    -o PermitLocalCommand=no \
+    -o ControlMaster=auto \
+    -o "ControlPath=/tmp/.ccmux-${HOST#fpga}" \
+    -o ControlPersist=600 \
+    "$HOST" \
+    "$@"

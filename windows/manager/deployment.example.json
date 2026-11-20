@@ -1,0 +1,7 @@
+{
+  "ssh_alias": "my-linux",
+  "expected_ip": "203.0.113.10",
+  "expected_country": "US",
+  "expected_colo": "LAX",
+  "remote_path": "/home/your-user"
+}

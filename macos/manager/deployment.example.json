@@ -1,0 +1,10 @@
+{
+  "ssh_alias": "ccen",
+  "expected_ip": "203.0.113.10",
+  "expected_country": "US",
+  "expected_colo": "IAD",
+  "remote_path": "/home/your-user",
+  "remote_enabled": false,
+  "residential_port": 7895,
+  "ordinary_port": 7890
+}

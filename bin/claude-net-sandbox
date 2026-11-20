@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly CLAUDE_RUNTIME_DIR="/run/user/__CCEN_UID__"
+readonly CLAUDE_GUARD="__CCEN_HOME__/.local/bin/claude-ip-guard"
+readonly CLAUDE_LAUNCHER="__CCEN_HOME__/.local/libexec/claude-net-launcher"
+
+die() {
+    printf 'claude-net-sandbox: %s\n' "$*" >&2
+    exit 1
+}
+
+(( $# >= 1 )) || die "missing Claude executable"
+case "$1" in
+    /*) ;;
+    *) die "Claude executable must be an absolute path" ;;
+esac
+[[ -f "$1" && -x "$1" ]] || die "Claude executable is not an executable file: $1"
+
+[[ "$(id -u)" == "__CCEN_UID__" ]] || die "refusing to use another user's runtime directory"
+[[ -d "$CLAUDE_RUNTIME_DIR" && -O "$CLAUDE_RUNTIME_DIR" && -w "$CLAUDE_RUNTIME_DIR" ]] \
+    || die "private runtime directory is unavailable: $CLAUDE_RUNTIME_DIR"
+[[ -x "$CLAUDE_GUARD" ]] || die "IP guard is unavailable: $CLAUDE_GUARD"
+[[ -x "$CLAUDE_LAUNCHER" ]] || die "sandbox launcher is unavailable: $CLAUDE_LAUNCHER"
+
+# Fail closed before creating the Claude process. The guard owns all diagnostics;
+# its normal status output must not enter Claude's stdio protocol.
+"$CLAUDE_GUARD" enforce >/dev/null
+
+umask 077
+claude_argfile="$(mktemp "$CLAUDE_RUNTIME_DIR/claude-net-argv.XXXXXXXX")" \
+    || die "cannot create private argument file"
+claude_passwd_file=""
+cleanup() {
+    rm -f -- "${claude_argfile:-}"
+    rm -f -- "${claude_passwd_file:-}"
+}
+trap cleanup EXIT
+
+claude_cwd="$(pwd -P)" || die "cannot resolve current working directory"
+current_uid="$(id -u)"
+
+# OpenSSH resolves the local account before it opens a network connection.
+# Some hosts use an external NSS provider (for example winbind) whose /run
+# sockets are intentionally hidden. Extend a private passwd snapshot with the
+# current account when needed, without exposing those host NSS sockets.
+claude_passwd_file="$(mktemp "$CLAUDE_RUNTIME_DIR/claude-net-passwd.XXXXXXXX")" \
+    || die "cannot create private passwd snapshot"
+cp -- /etc/passwd "$claude_passwd_file" \
+    || die "cannot copy the system passwd database"
+if ! awk -F: -v expected_uid="$current_uid" \
+    '$3 == expected_uid { found = 1 } END { exit !found }' \
+    "$claude_passwd_file"; then
+    mapfile -t current_passwd_records < <(getent passwd "$current_uid")
+    (( ${#current_passwd_records[@]} == 1 )) \
+        || die "cannot resolve a unique passwd record for uid $current_uid"
+    current_passwd_entry="${current_passwd_records[0]}"
+    IFS=: read -r \
+        passwd_name passwd_secret passwd_uid passwd_gid \
+        passwd_gecos passwd_home passwd_shell passwd_extra \
+        <<<"$current_passwd_entry"
+    [[ -n "$passwd_name" && "$passwd_uid" == "$current_uid" &&
+       "$passwd_gid" =~ ^[0-9]+$ && "$passwd_home" == /* &&
+       "$passwd_shell" == /* && -z "${passwd_extra:-}" ]] \
+        || die "host passwd record failed validation"
+    printf '%s\n' "$current_passwd_entry" >>"$claude_passwd_file" \
+        || die "cannot extend the private passwd snapshot"
+fi
+chmod 0600 "$claude_passwd_file" \
+    || die "cannot secure private passwd snapshot"
+
+# Keep cwd, the passwd snapshot path, and argv out of systemd-run's command
+# line. systemd 249 expands strings such as "$HOME" in transient-unit
+# arguments, which would otherwise alter legitimate Claude arguments or
+# unusual workspace paths.
+printf '%s\0' "$claude_cwd" "$claude_passwd_file" "$@" >"$claude_argfile" \
+    || die "cannot write private argument file"
+chmod 0600 "$claude_argfile" \
+    || die "cannot secure private argument file"
+
+claude_unit="claude-net-__CCEN_UID__-$(date +%s%N)-$$-${RANDOM}.scope"
+
+# A scope preserves the caller's complete environment and stdio. The bwrap
+# launcher provides the actual network isolation; the scope gives the whole
+# process tree one identifiable, stoppable cgroup.
+set +e
+systemd-run \
+    --user \
+    --scope \
+    --quiet \
+    --collect \
+    --unit="$claude_unit" \
+    --property=KillMode=control-group \
+    --property=TimeoutStopSec=2s \
+    --property=SendSIGKILL=yes \
+    "$CLAUDE_LAUNCHER" "$claude_argfile"
+claude_rc=$?
+set -e
+
+exit "$claude_rc"

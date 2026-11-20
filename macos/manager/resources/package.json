@@ -1,0 +1,8 @@
+{
+  "name": "ccen-browser-guard",
+  "version": "2026.10.30",
+  "private": true,
+  "description": "Fixed-exit browser guard shipped with the CCEN Windows manager",
+  "engines": { "node": ">=22" },
+  "dependencies": { "https-proxy-agent": "7.0.6" }
+}

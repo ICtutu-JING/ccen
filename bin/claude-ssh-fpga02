@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# 入口：见 claude-ssh-lab（2026-10-15）
+exec __CCEN_HOME__/.local/bin/claude-ssh-lab fpga02 "$@"

@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Client for the opt-in CCEN host job runner."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+MAX_RESPONSE = 1024 * 1024
+
+
+def socket_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    explicit = os.environ.get("CCEN_HOST_RUNNER_SOCKET")
+    if explicit:
+        candidates.append(Path(explicit))
+
+    # The first path is used by the portable repository.  The second supports
+    # older CCEN installs whose guarded runtime directory had a longer name.
+    candidates.extend(
+        (
+            Path("/run/ccen/host-runner.sock"),
+            Path("/run/claude-ip-gate/host-runner.sock"),
+        )
+    )
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        runtime_path = Path(runtime)
+        candidates.extend(
+            (
+                runtime_path / "ccen" / "host-runner.sock",
+                runtime_path / "claude-ip-gate" / "host-runner.sock",
+            )
+        )
+
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_absolute() and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def find_socket() -> Path:
+    for candidate in socket_candidates():
+        try:
+            if candidate.is_socket():
+                return candidate
+        except OSError:
+            continue
+    searched = ", ".join(str(path) for path in socket_candidates())
+    raise RuntimeError(f"host runner socket is unavailable; searched: {searched}")
+
+
+def request(payload: dict[str, Any]) -> dict[str, Any]:
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(encoded) > 64 * 1024:
+        raise RuntimeError("request is too large")
+
+    path = find_socket()
+    response = bytearray()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(45.0)
+        client.connect(str(path))
+        client.sendall(encoded)
+        while b"\n" not in response:
+            chunk = client.recv(64 * 1024)
+            if not chunk:
+                break
+            response.extend(chunk)
+            if len(response) > MAX_RESPONSE:
+                raise RuntimeError("host runner response is too large")
+
+    line, separator, _remainder = bytes(response).partition(b"\n")
+    if not separator:
+        raise RuntimeError("host runner closed without a complete response")
+    try:
+        decoded = json.loads(line)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("host runner returned invalid JSON") from error
+    if not isinstance(decoded, dict):
+        raise RuntimeError("host runner returned an invalid response object")
+    if decoded.get("ok") is not True:
+        message = decoded.get("error", "host runner rejected the request")
+        raise RuntimeError(str(message))
+    return decoded
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Submit and inspect approved jobs running on the real host"
+    )
+    subparsers = parser.add_subparsers(dest="operation", required=True)
+
+    submit = subparsers.add_parser("submit", help="submit an approved profile")
+    submit.add_argument("profile")
+    submit.add_argument("--request-id", default=None)
+
+    status = subparsers.add_parser("status", help="show one job")
+    status.add_argument("job_id")
+
+    subparsers.add_parser("list", help="list known jobs")
+
+    logs = subparsers.add_parser("logs", help="read a bounded log chunk")
+    logs.add_argument("job_id")
+    logs.add_argument("--offset", type=int, default=0)
+    logs.add_argument("--limit", type=int, default=65536)
+
+    cancel = subparsers.add_parser("cancel", help="stop one complete job cgroup")
+    cancel.add_argument("job_id")
+
+    wait = subparsers.add_parser("wait", help="wait until a job is no longer active")
+    wait.add_argument("job_id")
+    wait.add_argument("--interval", type=float, default=2.0)
+    wait.add_argument("--timeout", type=float, default=0.0)
+    return parser.parse_args()
+
+
+def emit(response: dict[str, Any]) -> None:
+    print(json.dumps(response, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def main() -> int:
+    args = parse_args()
+    if args.operation == "submit":
+        response = request(
+            {
+                "op": "submit",
+                "profile": args.profile,
+                "request_id": args.request_id or str(uuid.uuid4()),
+            }
+        )
+    elif args.operation == "status":
+        response = request({"op": "status", "job_id": args.job_id})
+    elif args.operation == "list":
+        response = request({"op": "list"})
+    elif args.operation == "logs":
+        if args.offset < 0 or not 1 <= args.limit <= 256 * 1024:
+            raise RuntimeError("offset/limit is outside the allowed range")
+        response = request(
+            {
+                "op": "logs",
+                "job_id": args.job_id,
+                "offset": args.offset,
+                "limit": args.limit,
+            }
+        )
+    elif args.operation == "cancel":
+        response = request({"op": "cancel", "job_id": args.job_id})
+    elif args.operation == "wait":
+        if args.interval < 0.2 or args.timeout < 0:
+            raise RuntimeError("invalid wait interval or timeout")
+        started = time.monotonic()
+        while True:
+            response = request({"op": "status", "job_id": args.job_id})
+            state = response.get("job", {}).get("state")
+            if state not in {"queued", "running", "stopping"}:
+                break
+            if args.timeout and time.monotonic() - started >= args.timeout:
+                raise RuntimeError("wait timed out")
+            time.sleep(args.interval)
+    else:  # pragma: no cover - argparse enforces the choices.
+        raise RuntimeError("unsupported operation")
+
+    emit(response)
+    if args.operation == "wait":
+        job = response.get("job", {})
+        state = job.get("state")
+        if state == "succeeded":
+            return 0
+        if state == "timed-out":
+            return 124
+        if state == "cancelled":
+            return 130
+        result = job.get("result", {})
+        returncode = result.get("returncode")
+        if isinstance(returncode, int) and 1 <= returncode <= 125:
+            return returncode
+        return 125
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError) as error:
+        print(f"ccen-host-run: {error}", file=sys.stderr)
+        raise SystemExit(1)

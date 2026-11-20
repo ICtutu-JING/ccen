@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly RELAY_SOCKET="/run/claude-fpga03-ssh-relay/ssh.sock"
+readonly IDENTITY_FILE="__CCEN_SSH_IDENTITY__"
+readonly KNOWN_HOSTS_FILE="__CCEN_SSH_KNOWN_HOSTS__"
+
+[[ "$(id -u)" == "__CCEN_UID__" ]] || {
+    printf 'claude-ssh-fpga03: unexpected local uid\n' >&2
+    exit 1
+}
+[[ -S "$RELAY_SOCKET" ]] || {
+    printf 'claude-ssh-fpga03: fixed relay socket is unavailable\n' >&2
+    exit 1
+}
+[[ -r "$IDENTITY_FILE" && -r "$KNOWN_HOSTS_FILE" ]] || {
+    printf 'claude-ssh-fpga03: SSH identity or known-hosts file is unavailable\n' >&2
+    exit 1
+}
+
+exec /usr/bin/ssh \
+    -F /dev/null \
+    -o BatchMode=yes \
+    -o ConnectTimeout=10 \
+    -o 'HostName=__CCEN_FPGA03_IP__' \
+    -o 'User=__CCEN_SSH_USER__' \
+    -o "IdentityFile=$IDENTITY_FILE" \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=yes \
+    -o "UserKnownHostsFile=$KNOWN_HOSTS_FILE" \
+    -o HostKeyAlias=fpga03 \
+    -o "ProxyCommand=/usr/bin/nc -U $RELAY_SOCKET" \
+    -o ForwardAgent=no \
+    -o ClearAllForwardings=yes \
+    -o PermitLocalCommand=no \
+    -o ControlMaster=auto \
+    -o ControlPath=/tmp/.ccmux-f03 \
+    -o ControlPersist=300 \
+    fpga03 \
+    "$@"

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+# claude-ssh-fpga04 — 直连本机(fpga04)宿主侧，不再绕 fpga03。
+# 链路: 容器 -> /run/claude-fpga04-ssh-relay/ssh.sock -> 127.0.0.1:22
+
+readonly RELAY_SOCKET="/run/claude-fpga04-ssh-relay/ssh.sock"
+readonly IDENTITY_FILE="__CCEN_SSH_IDENTITY__"
+readonly KNOWN_HOSTS_FILE="__CCEN_SSH_KNOWN_HOSTS__"
+
+[[ "$(id -u)" == "__CCEN_UID__" ]] || {
+    printf 'claude-ssh-fpga04: unexpected local uid\n' >&2; exit 1; }
+[[ -S "$RELAY_SOCKET" ]] || {
+    printf 'claude-ssh-fpga04: fixed relay socket is unavailable\n' >&2; exit 1; }
+[[ -r "$IDENTITY_FILE" && -r "$KNOWN_HOSTS_FILE" ]] || {
+    printf 'claude-ssh-fpga04: SSH identity or known-hosts file is unavailable\n' >&2; exit 1; }
+
+exec /usr/bin/ssh \
+    -F /dev/null \
+    -o BatchMode=yes \
+    -o ConnectTimeout=10 \
+    -o 'HostName=127.0.0.1' \
+    -o 'User=__CCEN_SSH_USER__' \
+    -o "IdentityFile=$IDENTITY_FILE" \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=yes \
+    -o "UserKnownHostsFile=$KNOWN_HOSTS_FILE" \
+    -o HostKeyAlias=fpga04 \
+    -o "ProxyCommand=/usr/bin/nc -U $RELAY_SOCKET" \
+    -o ForwardAgent=no \
+    -o ClearAllForwardings=yes \
+    -o PermitLocalCommand=no \
+    -o ControlMaster=auto \
+    -o ControlPath=/tmp/.ccmux-f04 \
+    -o ControlPersist=300 \
+    fpga04 \
+    "$@"

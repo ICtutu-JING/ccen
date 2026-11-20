@@ -1,0 +1,13 @@
+# Place a reviewed copy in your Windows ~/.ssh/config, never commit your private key.
+Host claude-server
+    HostName server.example.invalid
+    User YOUR_LINUX_USER
+    Port 22
+    IdentityFile ~/.ssh/YOUR_OWN_KEY
+    IdentitiesOnly yes
+    ForwardAgent no
+    ServerAliveInterval 15
+    ServerAliveCountMax 4
+    ExitOnForwardFailure yes
+# Verify the host key during an initial interactive SSH login.
+# Use the explicit ssh -NT -R command in docs/proxy-and-ssh.md for the proxy tunnel.
