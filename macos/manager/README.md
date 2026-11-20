@@ -8,6 +8,8 @@ macOS AppKit 菜单栏应用，使用 WKWebView 展示本机守卫、服务器�
 
 ## 安装和配置
 
+新 Mac 首次安装、迁移到同一台服务器、准备 SSH 公钥和检查模型登录，见 [换电脑安装教程](../../docs/install-on-another-computer.md)。
+
 下载 [macOS Apple Silicon ZIP](https://github.com/ICtutu-JING/ccen/releases/tag/macos-2026.11.06.1)，解压后把应用拖到“应用程序”。已经在这台 Mac 上配置过 CCEN，可继续使用应用数据和 SSH 配置。
 
 | 设置 | 这台 Mac 的配置 |

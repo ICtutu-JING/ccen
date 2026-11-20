@@ -13,6 +13,7 @@ CCEN 不是 Anthropic、OpenAI 或 AdsPower 的官方产品。
 
 | 需求 | 阅读入口 |
 | --- | --- |
+| 让 Codex 帮你在另一台电脑上安装和验收 | [换电脑安装教程与可复制提示词](docs/install-on-another-computer.md) |
 | 构建和使用 macOS 管理器 | [macOS 软件与构建说明](macos/manager/README.md) |
 | 下载或构建 Windows 管理器 | [Windows 软件](docs/windows.md)、[源码与配置](windows/manager/README.md) |
 | 建立完整链路 | [部署路线](docs/onboarding.md)、[代理与 SSH](docs/proxy-and-ssh.md)、[Linux](docs/linux.md) |
